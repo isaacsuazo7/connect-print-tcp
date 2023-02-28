@@ -10,7 +10,7 @@ Servicio para conectarse a una impresora en una red local mediante el protocolo 
 Clone the project
 
 ```bash
-  git clone https://link-to-project
+  git clone https://github.com/isaacsuazo7/connect-print-tcp.git
 ```
 
 Go to the project directory
