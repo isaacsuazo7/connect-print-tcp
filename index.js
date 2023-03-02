@@ -4,13 +4,11 @@ const bodyParser = require("body-parser");
 const cors = require("cors");
 const ip = require("ip");
 const network = require("network");
-var dialog = require("dialog-node");
+const exec = require("child_process");
 
 const app = express();
 const hostPort = 3000;
 let hostname = ip.address();
-
-let dialogActive = false;
 
 app.use(cors());
 app.use(bodyParser.json());
@@ -36,8 +34,8 @@ const print = async (printerHost, printerPort, dataToPrint) => {
     const client = new net.Socket();
 
     client.on("error", (err) => {
-      const error = `Error al conectar con la impresora http://${printerHost}/${printerPort}, verifica que el Servicio de red de Impresoras YALO este conectado a la misma red que la impresora.`;
-      showDialogError("Error", error);
+      const error = `Error al conectar con la impresora http://${printerHost}/${printerPort}, verifica que el YALO Printer Service este conectado a la misma red que la impresora.`;
+      showDialogInfoCMD(error);
       reject(error);
     });
 
@@ -45,9 +43,7 @@ const print = async (printerHost, printerPort, dataToPrint) => {
       console.log(
         `Conexión TCP establecida en http://${printerHost}/${printerPort}.`
       );
-
       client.write(dataToPrint, () => {
-        console.log("Impresión exitosa");
         client.end();
         resolve();
       });
@@ -60,9 +56,8 @@ const print = async (printerHost, printerPort, dataToPrint) => {
 const startServer = () => {
   server = app.listen(hostPort, hostname, () => {
     console.log(`Servidor ejecutándose en: http://${hostname}:${hostPort}`);
-    showDialogInfo(
-      `Servicio de red de Impresoras YALO`,
-      `El servicio de red de impresoras YALO se esta ejecutando en la red http://${hostname}/${hostPort} , verifica que esta sea la red correcta.`
+    showDialogInfoCMD(
+      `YALO Printer Service se esta ejecutando en la red http://${hostname}/${hostPort} , verifica que esta sea la red correcta.`
     );
   });
 };
@@ -74,7 +69,6 @@ startServer();
 const restartServer = () => {
   if (server) {
     server.close(() => {
-      console.log("Servicio de red de Impresoras YALO reiniciado.");
       startServer();
     });
   } else {
@@ -86,9 +80,8 @@ setInterval(() => {
   network.get_active_interface((err, iface) => {
     if (err) {
       console.error(err);
-      showDialogError(
-        "Servicio de red de Impresoras YALO",
-        "Servicio de red de Impresoras YALO se detuvo ya que no tiene conexión a la red."
+      showDialogInfoCMD(
+        `YALO Printer Servicese detuvo ya que no tiene conexión a la red.`
       );
       return;
     }
@@ -105,16 +98,20 @@ setInterval(() => {
 
 // Dialogs
 
-const showDialogInfo = (title, message) => {
-  if (!dialogActive) {
-    dialogActive = true;
-    dialog.info(message, title, 0, () => dialogActive = false);
-  }
-};
-
-const showDialogError = (title, message) => {
-  if (!dialogActive) {
-    dialogActive = true;
-    dialog.error(message, title, 0, () => dialogActive = false);
-  }
+const showDialogInfoCMD = (message) => {
+  const command = `echo ${message}`;
+  exec.exec(
+    `start "YaloPrinterService" cmd /c "${command} && timeout /t 10 > nul"`,
+    { windowsHide: true },
+    (error, stdout, stderr) => {
+      if (error) {
+        console.error(`Error: ${error.message}`);
+        return;
+      }
+      if (stderr) {
+        console.error(`stderr: ${stderr}`);
+        return;
+      }
+    }
+  );
 };

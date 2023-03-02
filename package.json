@@ -7,17 +7,17 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "nodemon index.js",
     "build": "ncc build index.js -o dist",
-    "packing": "pkg dist/index.js --out-path dist"
+    "packing": "pkg -t node18-win-x64 dist/index.js --out-path dist",
+    "build-2": "pkg ."
   },
   "author": "Isaac Suazo",
   "license": "ISC",
   "dependencies": {
     "body-parser": "^1.20.2",
     "cors": "^2.8.5",
-    "dialog-node": "^0.2.1",
     "express": "^4.18.2",
     "ip": "^1.1.8",
-    "network": "^0.2.0"
+    "network": "^0.6.1"
   },
   "devDependencies": {
     "nodemon": "^2.0.20"
