@@ -5,10 +5,27 @@ const cors = require("cors");
 const ip = require("ip");
 const network = require("network");
 const exec = require("child_process");
+const expressSanitizer = require("express-sanitizer");
 
 const app = express();
 const hostPort = 3000;
 let hostname = ip.address();
+
+const https = require("https");
+const fs = require("fs");
+const { send } = require("process");
+
+const options = {
+  key: fs.readFileSync("./config/localhost.decrypted.key"),
+  cert: fs.readFileSync("./config/localhost.crt"),
+};
+
+
+// Mount express-sanitizer middleware here
+app.use(expressSanitizer());
+
+// Server static html file to check if the server is working 
+app.use("/", express.static("public"));
 
 app.use(cors());
 app.use(bodyParser.json());
@@ -54,12 +71,31 @@ const print = async (printerHost, printerPort, dataToPrint) => {
 // START SERVER
 
 const startServer = () => {
-  server = app.listen(hostPort, hostname, () => {
-    console.log(`Servidor ejecutándose en: http://${hostname}:${hostPort}`);
-    showDialogInfoCMD(
-      `YALO Printer Service se esta ejecutando en la red http://${hostname}/${hostPort} , verifica que esta sea la red correcta.`
-    );
-  });
+
+
+  app.get('/',(req, res, next) =>{
+    res.status(200),send('corriendo');
+  })
+  
+
+  const server = https.createServer(options, app);
+  server.listen(hostPort, () =>{
+    console.log('corriendo')
+  } )
+  // app.listen(hostPort, hostname, () => {
+  //   console.log(`Servidor ejecutándose en: https://${hostname}:${hostPort}`);
+  //   showDialogInfoCMD(
+  //     `YALO Printer Service se esta ejecutando en la red https://${hostname}/${hostPort} , verifica que esta sea la red correcta.`
+  //   );
+  // });
+
+  // server  =   https.createServer(options, app).listen(hostPort, () => {
+  //   console.log(`HTTPS server started on port 8080`);
+  // });
+
+ // console.log(server)
+
+  
 };
 
 startServer();
