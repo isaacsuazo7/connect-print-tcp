@@ -1,14 +1,16 @@
 {
   "name": "connect-print-tcp",
-  "version": "1.0.0",
+  "version": "1.3.0",
   "description": "Test TCP-Socket printer",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "nodemon index.js",
-    "build": "ncc build index.js -o dist",
-    "packing": "pkg -t node18-win-x64 dist/index.js --out-path dist",
-    "build-2": "pkg ."
+    "test": "node --experimental-sqlite --no-warnings --test \"test/*.test.js\"",
+    "start": "nodemon --exec \"node --experimental-sqlite\" index.js",
+    "build": "npx -y @vercel/ncc@0.38.1 build main.js -o dist",
+    "packing": "npx -y @yao-pkg/pkg@6.10.1 -t node22-win-x64 --options experimental-sqlite,no-warnings dist/index.js -o dist/YaloPrinterService.exe"
+  },
+  "engines": {
+    "node": ">=22"
   },
   "author": "Isaac Suazo",
   "license": "ISC",

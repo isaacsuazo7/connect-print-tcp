@@ -1,151 +1,583 @@
-const net = require("net");
+// YaloPrinterService (agente de impresión Yalo). Servicio de Windows que imprime en las impresoras de red
+// del local. La lógica vive en print-core/; acá solo está el servidor HTTP y el armado.
+//
+// Regla de oro (11-nov-2026): instalarlo no puede romper ningún POS que hoy imprime. Por eso /print sin
+// job_id mantiene el contrato de siempre, y el token / CORS restringido arrancan apagados.
+
+const os = require("os");
+const path = require("path");
 const express = require("express");
 const bodyParser = require("body-parser");
-const cors = require("cors");
-const ip = require("ip");
-const network = require("network");
 const exec = require("child_process");
+const { version: VERSION } = require("./package.json");
+const {
+  enviarTrabajo,
+  RESULTADO,
+  SerializadorPorImpresora,
+  RegistroImpresoras,
+  Discovery,
+  DISCOVERY,
+  MonitorImpresoras,
+  ESTADO,
+  AlmacenCola,
+  ColaAgente,
+  ESTADO_TRABAJO,
+  IdentidadAgente,
+  ipDelCliente,
+  esLoopback,
+  ipPrincipal,
+  RegistroEventos,
+  comoTexto,
+  armarTicketPrueba,
+  crearProteccion,
+  HeartbeatNube,
+  Actualizador,
+  CLAVE_PUBLICA_ACTUALIZACIONES,
+} = require("./print-core");
+
+// ---------------------------------------------------------------------------------------------------
+// CONFIGURACIÓN
+// ---------------------------------------------------------------------------------------------------
+
+/** Puerto fijo (el POS lo busca en el 3000). PORT solo para desarrollo, si el 3000 está ocupado. */
+const PUERTO_SERVICIO = Number(process.env.PORT) || 3000;
+
+/**
+ * Brief §6.2.1 / prueba P4: escuchar en TODAS las interfaces. Antes se escuchaba en una sola IP decidida
+ * al arrancar y después de un apagón nadie lo encontraba. 0.0.0.0 incluye 127.0.0.1.
+ */
+const HOST_TODAS_LAS_INTERFACES = "0.0.0.0";
+
+/** Identifica al agente nuevo ante el POS (NOMBRE_AGENTE_YALO en print-transport.types.ts). */
+const NOMBRE_SERVICIO = "yalo-print-agent";
+
+const CARPETA_DATOS =
+  process.env.YALO_AGENT_DATA || path.join(process.env.ProgramData || os.tmpdir(), "Yalo", "PrintAgent");
+
+const INTERVALO_REVISION_RED_MS = 10000;
+const INTERVALO_DISCOVERY_MS = 60000;
+/** Tras un fallo de conexión se barre la red ya, pero no más de una vez cada 30 s (impresora apagada). */
+const ESPERA_ENTRE_RESCATES_MS = 30000;
+/**
+ * Auto-actualización (brief §6.2.1): solo cuando lo lanza el supervisor (servicio/supervisor.js), que es
+ * quien cambia de versión y hace rollback. En desarrollo (node index.js) o sin supervisor, apagada.
+ */
+const SUPERVISADO = process.env.YALO_AGENT_SUPERVISADO === "1" && Boolean(process.env.YALO_AGENT_RAIZ);
+/** Si el supervisor muere (no debería), el agente sale para no quedar huérfano ocupando el puerto. */
+const REVISAR_SUPERVISOR_MS = 5000;
+/** /agent/restart espera a que terminen los trabajos en curso, como mucho esto. */
+const ESPERA_MAXIMA_REINICIO_MS = 5000;
+
+const STATUS = Object.freeze({
+  OK: 200,
+  ENCOLADO: 202,
+  PEDIDO_INVALIDO: 400,
+  PROHIBIDO: 403,
+  NO_ENCONTRADO: 404,
+  ERROR: 500,
+  SIN_CONEXION_IMPRESORA: 502,
+  SIN_COLA: 503,
+  SIN_CONFIRMACION: 504,
+});
+
+const STATUS_POR_RESULTADO = {
+  [RESULTADO.IMPRESO]: STATUS.OK,
+  [RESULTADO.FALLIDO]: STATUS.SIN_CONEXION_IMPRESORA,
+  [RESULTADO.INCIERTO]: STATUS.SIN_CONFIRMACION,
+};
+
+/**
+ * Lo que la nube puede cambiar por el heartbeat. Protección de la API local apagada por defecto; tiempos
+ * de la cola por tipo ({ comanda: { autoMs, duroMs } }) vacíos = los mismos del POS.
+ */
+const configuracion = { exigirToken: false, restringirCors: false, tiemposCola: {} };
+
+// ---------------------------------------------------------------------------------------------------
+// LOG
+// ---------------------------------------------------------------------------------------------------
+
+const eventos = new RegistroEventos();
+const log = (...mensaje) => {
+  console.log(new Date().toISOString(), ...mensaje);
+  eventos.agregar(comoTexto(mensaje));
+};
+
+// ---------------------------------------------------------------------------------------------------
+// PIEZAS
+// ---------------------------------------------------------------------------------------------------
+
+const inicio = Date.now();
+/** Para no actualizar en plena venta: la auto-actualización espera un rato sin impresiones. */
+let ultimaImpresion = 0;
+const marcarImpresion = () => {
+  ultimaImpresion = Date.now();
+};
+
+const ipsLocales = () =>
+  Object.values(os.networkInterfaces())
+    .flat()
+    .filter((i) => i && !i.internal && (i.family === "IPv4" || i.family === 4))
+    .map((i) => i.address)
+    .sort();
+let ipsActuales = ipsLocales();
+
+const identidad = new IdentidadAgente(path.join(CARPETA_DATOS, "agente.json"), { log });
+const serializador = new SerializadorPorImpresora();
+const registro = new RegistroImpresoras(path.join(CARPETA_DATOS, "impresoras.json"));
+/** @type {HeartbeatNube | null} se crea más abajo; las piezas de antes le avisan por acá */
+let heartbeat = null;
+const avisarANube = (tipo, datos) => {
+  if (heartbeat) heartbeat.evento(tipo, datos);
+};
+const discovery = new Discovery({
+  registro,
+  log,
+  alMoverse: ({ impresora, antes, despues }) =>
+    avisarANube("printer_ip_changed", { CodImpresora: impresora.codImpresora, Mac: impresora.mac, IpAnterior: antes, IpNueva: despues }),
+});
+let ultimoRescate = 0;
+
+const rescatar = () => {
+  if (Date.now() - ultimoRescate <= ESPERA_ENTRE_RESCATES_MS) return Promise.resolve([]);
+  ultimoRescate = Date.now();
+  return discovery.ubicar({ forzarBarrido: true });
+};
+
+const ESTADOS_SIN_CONEXION = new Set([ESTADO.OFFLINE, ESTADO.NOT_FOUND]);
+const monitor = new MonitorImpresoras({
+  registro,
+  serializador,
+  log,
+  alCambiar: ({ impresora, de, a }) => {
+    // Se cayó: puede que haya cambiado de IP. Buscarla ya.
+    if (ESTADOS_SIN_CONEXION.has(a)) rescatar();
+    const evento = { CodImpresora: impresora.codImpresora, Ip: impresora.ip, De: de, A: a, FlushedJobs: 0 };
+    // Volvió de una caída: descargar su cola y avisar cuántos salieron (la métrica principal del
+    // proyecto: recuperaciones automáticas). "unknown → online" (arranque) no cuenta como recuperación.
+    const volvioDeUnaCaida = a === ESTADO.ONLINE && de !== ESTADO.ONLINE && de !== ESTADO.DESCONOCIDO;
+    if (volvioDeUnaCaida && cola) {
+      cola.alVolver(impresora).then((impresos) => avisarANube("printer_state_changed", { ...evento, FlushedJobs: impresos }));
+      return;
+    }
+    avisarANube("printer_state_changed", evento);
+  },
+});
+
+// Cola persistente (brief §6.2.4). Solo la usan los pedidos con job_id. Si SQLite no abre, el servicio
+// sigue y esos pedidos se imprimen al momento como los demás (nunca dejar de imprimir).
+let cola = null;
+try {
+  cola = new ColaAgente({
+    almacen: new AlmacenCola(path.join(CARPETA_DATOS, "queue.db"), { log }),
+    registro,
+    serializador,
+    enviar: (t) => {
+      marcarImpresion();
+      return enviarTrabajo(t);
+    },
+    monitor,
+    log,
+    ttlNube: () => configuracion.tiemposCola,
+    alDescargar: ({ impresora, impresos }) => {
+      log(`Recuperación automática: ${impresora.nombre || impresora.clave} imprimió ${impresos} pendiente(s) al volver`);
+    },
+  });
+} catch (error) {
+  console.error(new Date().toISOString(), "La cola no está disponible; se imprime al momento", error);
+}
+
+const impresorasConEstado = () => registro.lista().map((imp) => ({ ...imp, ...monitor.estadoDe(imp) }));
+const ipDelLocal = () => ipPrincipal(ipsActuales, registro.lista().map((i) => i.ip));
+
+// HEARTBEAT (brief §6.2.6) contra la API de QA: Impresoras/Agentes/Heartbeat.
+
+/** Estados en los que la impresora contestó por TCP (aunque tenga la tapa abierta). */
+const ESTADOS_QUE_RESPONDEN = new Set([ESTADO.ONLINE, ESTADO.ERROR_TAPA, ESTADO.ERROR_PAPEL, ESTADO.ERROR]);
+
+/** HeartbeatAgenteRequest de la API + lo que pide el brief (la API ignora lo que no conoce). */
+function reporteParaNube() {
+  const impresoras = registro
+    .lista()
+    .filter((i) => i.codImpresora) // la nube solo conoce las que tienen código
+    .map((i) => {
+      const e = monitor.estadoDe(i);
+      return {
+        CodImpresora: i.codImpresora,
+        Ip: i.ip,
+        Puerto: String(i.puerto),
+        Mac: i.mac,
+        Responde: ESTADOS_QUE_RESPONDEN.has(e.estado),
+        LatenciaMs: e.latenciaMs ?? null,
+        Error: e.estado === ESTADO.ONLINE ? null : e.estado,
+        Estado: e.estado,
+        Discovery: i.discovery,
+        UltimaVez: i.vistaEn,
+      };
+    });
+  return {
+    Version: VERSION,
+    NombreEquipo: os.hostname(),
+    IpLocal: ipDelLocal(),
+    Puerto: PUERTO_SERVICIO,
+    Impresoras: impresoras,
+    IpsLocales: ipsActuales,
+    UptimeSegundos: Math.round((Date.now() - inicio) / 1000),
+    Modo: "service",
+    Cola: cola ? cola.totales() : null,
+    // Versión anterior y resultado de la última actualización (brief §6.2.1).
+    ...(actualizador ? actualizador.resumen() : {}),
+  };
+}
+
+/** HeartbeatAgenteRespuesta: la lista de impresoras a vigilar y, cuando la nube lo mande, configuración. */
+function aplicarRespuestaNube(datos) {
+  if (Array.isArray(datos.Impresoras)) registro.sincronizarConNube(datos.Impresoras);
+  if (typeof datos.ExigirToken === "boolean") configuracion.exigirToken = datos.ExigirToken;
+  if (typeof datos.RestringirCors === "boolean") configuracion.restringirCors = datos.RestringirCors;
+  if (datos.TiemposCola && typeof datos.TiemposCola === "object") configuracion.tiemposCola = datos.TiemposCola;
+  if (actualizador) actualizador.ofrecer(datos.Actualizacion || null);
+}
+
+heartbeat = new HeartbeatNube({ identidad, armarReporte: reporteParaNube, alResponder: aplicarRespuestaNube, log });
+
+/** Hay algo en cola o imprimiéndose: no es momento de reiniciar para actualizar. */
+function hayImpresionesEnCurso() {
+  if (serializador.impresorasOcupadas > 0) return true;
+  if (!cola) return false;
+  const totales = cola.totales();
+  return cola.procesando.size > 0 || (totales[ESTADO_TRABAJO.PENDIENTE] || 0) > 0 || (totales[ESTADO_TRABAJO.IMPRIMIENDO] || 0) > 0;
+}
+
+const actualizador = SUPERVISADO
+  ? new Actualizador({
+      raiz: process.env.YALO_AGENT_RAIZ,
+      versionActual: VERSION,
+      clavePublica: CLAVE_PUBLICA_ACTUALIZACIONES,
+      estaOcupado: hayImpresionesEnCurso,
+      msDesdeUltimaImpresion: () => Date.now() - ultimaImpresion,
+      reiniciar: () => reiniciarCuandoTermine(),
+      evento: avisarANube,
+      log,
+    })
+  : null;
+
+/** Busca por clave ("cod:12", "ip:10.0.30.243:9100") o por código de impresora ("12"). */
+const buscarImpresora = (id) =>
+  registro.impresoras.get(id) || (/^\d+$/.test(id) ? registro.buscarPorCodigo(Number(id)) : null);
+
+/**
+ * Imprime al momento en donde esté la impresora. Si no conecta y se conoce su MAC, la busca en la red
+ * y, si se movió, reintenta UNA vez en la IP nueva (seguro: "fallido" = no se mandó nada).
+ */
+const imprimirAhora = (impresora, datos) =>
+  serializador.ejecutar(impresora.clave, async () => {
+    marcarImpresion();
+    let envio = await enviarTrabajo({ host: impresora.ip, puerto: impresora.puerto, datos });
+    if (envio.resultado === RESULTADO.FALLIDO && impresora.mac) {
+      const ipAntes = impresora.ip;
+      await rescatar();
+      if (impresora.ip !== ipAntes) envio = await enviarTrabajo({ host: impresora.ip, puerto: impresora.puerto, datos });
+    }
+    monitor.registrarEnvio(impresora, envio.resultado);
+    const capturarMac = !impresora.mac && impresora.discovery !== DISCOVERY.DEGRADADO;
+    if (envio.resultado === RESULTADO.IMPRESO && capturarMac) discovery.ubicar(); // en segundo plano
+    return envio;
+  });
+
+// ---------------------------------------------------------------------------------------------------
+// SERVIDOR
+// ---------------------------------------------------------------------------------------------------
+
 const app = express();
-const hostPort = 3000;
-let hostname = ip.address();
-
-app.use(cors());
+const proteccion = crearProteccion(() => configuracion, () => identidad.tokenLocal);
+app.use(proteccion.cors);
 app.use(bodyParser.json());
+app.use(proteccion.token);
 
-// POST PRINT
+const soloDesdeEstaPc = (req, res, next) => {
+  if (esLoopback(req.socket.remoteAddress)) {
+    next();
+    return;
+  }
+  res.status(STATUS.PROHIBIDO).send({ message: "Solo se permite desde esta PC" });
+};
 
-app.post("/print", async (req, res) => {
+// HEALTH: lo que el POS necesita para reconocer al agente (SaludAgente en print-transport.types.ts).
+app.get("/health", (req, res) => {
+  const ahora = Date.now();
+  const resumenImpresoras = impresorasConEstado().map((i) => ({
+    id: i.clave,
+    codImpresora: i.codImpresora,
+    nombre: i.nombre,
+    ip: i.ip,
+    estado: i.estado,
+  }));
+  res.status(STATUS.OK).send({
+    servicio: NOMBRE_SERVICIO,
+    version: VERSION,
+    idAgente: identidad.idAgente,
+    agent_id: identidad.idAgente,
+    vinculado: identidad.vinculado,
+    nombreEquipo: os.hostname(),
+    ipLocal: ipDelLocal(),
+    // D3: IP desde la que este agente ve a quien pregunta (tablet en otra red = otra /24).
+    client_ip: ipDelCliente(req.socket.remoteAddress),
+    ipsLocales: ipsActuales,
+    lan_ips: ipsActuales,
+    uptimeSegundos: Math.round((ahora - inicio) / 1000),
+    uptime_s: Math.round((ahora - inicio) / 1000),
+    impresoras: resumenImpresoras,
+    cola: cola ? cola.totales() : null,
+    nube: heartbeat.resumen(),
+    actualizacion: actualizador ? actualizador.resumen() : null,
+  });
+});
+
+// VINCULAR: el POS de esta PC pasa lo que le dio la API (Impresoras/Agentes/Vincular).
+app.post("/vincular", soloDesdeEstaPc, (req, res) => {
   try {
-    const { printerHost, printerPort, dataToPrint } = req.body;
-    const uint8Array = new Uint8Array(Buffer.from(dataToPrint, "base64"));
-    await resolvePrint(printerHost, printerPort, uint8Array);
-    res.status(200).send({ message: "Impresión exitosa" });
+    const token = identidad.vincular(req.body || {});
+    log(`Agente vinculado a la nube: codAgente ${identidad.vinculo.codAgente} (${identidad.vinculo.apiUrl})`);
+    res.status(STATUS.OK).send({ message: "OK", token });
+    // Reportar enseguida: el POS espera ese primer reporte para que la nube active el servidor de
+    // impresión de la caja y le devuelva la lista de impresoras al agente.
+    heartbeat.ahora();
   } catch (error) {
-    console.error(error);
-    res.status(500).send({ message: error });
+    res.status(STATUS.PEDIDO_INVALIDO).send({ message: error.message });
   }
 });
 
-// CONNECT TCP PRINTER AND PRINT
-
-// const print = async (printerHost, printerPort, dataToPrint) => {
-//   return new Promise((resolve, reject) => {
-//     const client = new net.Socket();
-
-//     client.on("error", (err) => {
-//       const error = `Error al conectar con la impresora http://${printerHost}/${printerPort}, verifica que el YALO Printer Service este conectado a la misma red que la impresora.`;
-//       showDialogInfoCMD(error);
-//       reject(error);
-//     });
-
-//     client.connect({ port: printerPort, host: printerHost }, () => {
-//       console.log(
-//         `Conexión TCP establecida en http://${printerHost}/${printerPort}.`
-//       );
-//       client.write(dataToPrint, () => {
-//         client.end();
-//         resolve();
-//       });
-//     });
-//   });
-// };
-
-const resolvePrint = (printerHost, printerPort, dataToPrint) => {
-  return new Promise((resolve, reject) => {
-    const socket = new net.Socket();
-
-    const id = setTimeout(() => {
-      clearTimeout(id);
-      socket.destroy();
-      reject("TIMED OUT");
-      return;
-    }, 10000);
-
-    socket.connect({ port: printerPort, host: printerHost }, () => {
-      socket.write(dataToPrint, () => {
-        socket.end();
-        resolve();
-      });
-    });
-
-    socket.on("drain", () => {
-      clearTimeout(id); 
-      socket.destroy();
-      resolve();
-      console.log('DRAIN');
-      return;
-    });
-
-    socket.on("end", () => {
-      clearTimeout(id); 
-      socket.destroy();
-      resolve();
-      console.log('END');
-      return;
-    });
-
-    socket.on("error", err => {
-      const error = `Error al conectar con la impresora http://${printerHost}/${printerPort}, verifica que el YALO Printer Service este conectado a la misma red que la impresora.`;
-      showDialogInfoCMD(error);
-      reject(error);
-      return;
-    });
-
-    socket.on("close", () => {
-      resolve();
-      return;
-    });
-  });
-};
-
-// START SERVER
-
-const startServer = () => {
-  server = app.listen(hostPort, hostname, () => {
-    console.log(`Servidor ejecutándose en: http://${hostname}:${hostPort}`);
-    showDialogInfoCMD(
-      `YALO Printer Service se esta ejecutando en la red http://${hostname}:${hostPort} , verifica que esta sea la red correcta.`
-    );
-  });
-};
-
-startServer();
-
-// RESTART SERVER
-
-const restartServer = () => {
-  if (server) {
-    server.close(() => {
-      startServer();
-    });
-  } else {
-    startServer();
+// PRINT
+// Sin job_id: mismo contrato de siempre, con resultado real: 200 impreso / 502 no conectó / 504 sin
+// confirmación. Con job_id: cola, 202 al instante (el mismo job_id otra vez → 200 con su estado).
+app.post("/print", async (req, res) => {
+  const { printerHost, printerPort, dataToPrint, printerMac, codImpresora, job_id: jobId } = req.body || {};
+  const puerto = Number(printerPort);
+  if (!printerHost || !Number.isInteger(puerto) || typeof dataToPrint !== "string") {
+    res.status(STATUS.PEDIDO_INVALIDO).send({ message: "Faltan printerHost, printerPort o dataToPrint" });
+    return;
   }
-};
-
-setInterval(() => {
-  network.get_active_interface((err, iface) => {
-    if (err) {
-      console.error(err);
-      showDialogInfoCMD(
-        `YALO Printer Services se detuvo ya que no tiene conexión a la red.`
-      );
+  const datos = Buffer.from(dataToPrint, "base64");
+  if (jobId !== undefined && cola) {
+    encolarPedido(req.body, datos, res);
+    return;
+  }
+  const clave = `${printerHost}:${puerto}`;
+  try {
+    const { impresora } = registro.resolverDestino({ ip: printerHost, puerto, mac: printerMac, codImpresora: Number(codImpresora) || null });
+    const envio = await imprimirAhora(impresora, datos);
+    const redireccion = impresora.ip !== printerHost ? ` (se movió a ${impresora.ip})` : "";
+    log(`/print ${clave}${redireccion} ${datos.length} bytes -> ${envio.resultado} en ${envio.ms} ms${envio.error ? ` (${envio.error})` : ""}`);
+    if (envio.resultado === RESULTADO.IMPRESO) {
+      res.status(STATUS.OK).send({ message: "Impresión exitosa" });
       return;
     }
-
-    if (hostname !== iface.ip_address) {
-      console.log(
-        `Current HOSTNAME ${hostname} === Current IP ADDRESS ${iface.ip_address}`
+    if (envio.resultado === RESULTADO.FALLIDO) {
+      // Mismo aviso en la PC que antes cuando no se podía conectar.
+      showDialogInfoCMD(
+        `Error al conectar con la impresora http://${printerHost}/${puerto}, verifica que el YALO Printer Service este conectado a la misma red que la impresora.`
       );
-      hostname = iface.ip_address;
-      restartServer();
     }
+    res.status(STATUS_POR_RESULTADO[envio.resultado]).send({ message: envio.detalle, error: envio.error });
+  } catch (error) {
+    console.error(new Date().toISOString(), `/print ${clave} error inesperado`, error);
+    res.status(STATUS.ERROR).send({ message: String(error) });
+  }
+});
+
+/** Pista para el POS de cuándo va a salir. */
+function pistaDeSalida(trabajo, estadoImpresora) {
+  if (trabajo.status !== ESTADO_TRABAJO.PENDIENTE) return null;
+  if (estadoImpresora === ESTADO.ONLINE || estadoImpresora === ESTADO.DESCONOCIDO) return "inmediato";
+  return "cuando_vuelva_la_impresora";
+}
+
+function respuestaTrabajo(trabajo) {
+  const impresora = registro.impresoras.get(trabajo.printer_id);
+  const estadoImpresora = impresora ? monitor.estadoDe(impresora).estado : ESTADO.DESCONOCIDO;
+  return {
+    job_id: trabajo.job_id,
+    status: trabajo.status,
+    printer_state: estadoImpresora,
+    eta_hint: pistaDeSalida(trabajo, estadoImpresora),
+    attempts: trabajo.attempts,
+    last_error: trabajo.last_error,
+  };
+}
+
+function encolarPedido(cuerpo, datos, res) {
+  marcarImpresion();
+  try {
+    const { nuevo, trabajo } = cola.encolar({
+      jobId: cuerpo.job_id,
+      ip: cuerpo.printerHost,
+      puerto: Number(cuerpo.printerPort),
+      codImpresora: Number(cuerpo.codImpresora) || null,
+      mac: cuerpo.printerMac,
+      tipo: cuerpo.type,
+      datos,
+      creadoEn: cuerpo.created_at,
+      origen: cuerpo.origin_device,
+    });
+    log(`/print job ${trabajo.job_id} (${trabajo.type}) ${nuevo ? "encolado" : `repetido, ya está ${trabajo.status}`}`);
+    res.status(nuevo ? STATUS.ENCOLADO : STATUS.OK).send(respuestaTrabajo(trabajo));
+  } catch (error) {
+    res.status(STATUS.PEDIDO_INVALIDO).send({ message: error.message });
+  }
+}
+
+// JOBS
+const conCola = (manejador) => (req, res) => {
+  if (!cola) {
+    res.status(STATUS.SIN_COLA).send({ message: "La cola no está disponible en este equipo" });
+    return;
+  }
+  manejador(req, res);
+};
+
+app.get("/jobs", conCola((req, res) => {
+  const trabajos = cola.listar({ status: req.query.status, printer_id: req.query.printer_id, limite: req.query.limit });
+  res.status(STATUS.OK).send({ trabajos, totales: cola.totales() });
+}));
+
+app.get("/jobs/:id", conCola((req, res) => {
+  const trabajo = cola.obtener(req.params.id);
+  if (!trabajo) {
+    res.status(STATUS.NO_ENCONTRADO).send({ message: "No existe ese trabajo" });
+    return;
+  }
+  res.status(STATUS.OK).send(respuestaTrabajo(trabajo));
+}));
+
+app.post("/jobs/flush", conCola(async (req, res) => {
+  const impresos = await cola.descargar();
+  res.status(STATUS.OK).send({ impresos, totales: cola.totales() });
+}));
+
+for (const [accion, metodo] of [["confirm", "confirmar"], ["discard", "descartar"]]) {
+  app.post(`/jobs/:id/${accion}`, conCola((req, res) => {
+    const trabajo = cola[metodo](req.params.id);
+    if (!trabajo) {
+      res.status(STATUS.NO_ENCONTRADO).send({ message: "No existe ese trabajo" });
+      return;
+    }
+    log(`/jobs ${req.params.id} ${accion} -> ${trabajo.status}`);
+    res.status(STATUS.OK).send(respuestaTrabajo(trabajo));
+  }));
+}
+
+// PRINTERS
+app.get("/printers", (req, res) => {
+  res.status(STATUS.OK).send({ impresoras: impresorasConEstado() });
+});
+
+app.post("/printers/rediscover", async (req, res) => {
+  const movidas = await discovery.ubicar({ forzarBarrido: true });
+  res.status(STATUS.OK).send({
+    movidas: movidas.map((m) => ({ id: m.impresora.clave, antes: m.antes, despues: m.despues })),
+    impresoras: impresorasConEstado(),
   });
-}, 15000);
+});
 
-// Dialogs
+// TEST-PRINT: ticket con número de secuencia, nombre y corte; sin abrir la gaveta.
+app.post("/test-print/:printerId", async (req, res) => {
+  const impresora = buscarImpresora(req.params.printerId);
+  if (!impresora) {
+    res.status(STATUS.NO_ENCONTRADO).send({ message: "No se conoce esa impresora" });
+    return;
+  }
+  const secuencia = identidad.siguienteSecuenciaPrueba();
+  const datos = armarTicketPrueba({
+    secuencia,
+    nombre: impresora.nombre || impresora.clave,
+    ip: impresora.ip,
+    puerto: impresora.puerto,
+    version: VERSION,
+  });
+  const envio = await imprimirAhora(impresora, datos);
+  log(`/test-print ${impresora.clave} #${secuencia} -> ${envio.resultado}`);
+  res.status(STATUS_POR_RESULTADO[envio.resultado]).send({ secuencia, resultado: envio.resultado, message: envio.detalle });
+});
 
-const showDialogInfoCMD = (message) => {
+// AGENT/RESTART: termina lo que está imprimiendo y sale; el servicio de Windows (nssm) lo levanta en ~5 s.
+app.post("/agent/restart", soloDesdeEstaPc, (req, res) => {
+  log("Reinicio pedido por /agent/restart");
+  res.status(STATUS.ENCOLADO).send({ message: "Reiniciando" });
+  reiniciarCuandoTermine();
+});
+
+function reiniciarCuandoTermine() {
+  const limite = Date.now() + ESPERA_MAXIMA_REINICIO_MS;
+  const revisar = () => {
+    const ocupado = serializador.impresorasOcupadas > 0 || (cola && cola.procesando.size > 0);
+    if (ocupado && Date.now() < limite) {
+      setTimeout(revisar, 200);
+      return;
+    }
+    log("Saliendo para reiniciar");
+    process.exit(0);
+  };
+  revisar();
+}
+
+// LOGS
+app.get("/logs", (req, res) => {
+  res.status(STATUS.OK).send({ eventos: eventos.desde(req.query.since) });
+});
+
+// ---------------------------------------------------------------------------------------------------
+// ARRANQUE
+// ---------------------------------------------------------------------------------------------------
+
+const servidor = app.listen(PUERTO_SERVICIO, HOST_TODAS_LAS_INTERFACES, () => {
+  log(
+    `YALO Printer Service ${VERSION} (agente ${identidad.idAgente}) escuchando en el puerto ${PUERTO_SERVICIO} de todas las interfaces:`,
+    ["127.0.0.1", ...ipsActuales].map((ip) => `http://${ip}:${PUERTO_SERVICIO}`).join(", ")
+  );
+});
+// Puerto ocupado u otro error al abrirlo: salir con error para que nssm lo vuelva a intentar, en vez de
+// quedar vivo sin escuchar.
+servidor.on("error", (error) => {
+  console.error(new Date().toISOString(), "No se pudo abrir el puerto", PUERTO_SERVICIO, error);
+  process.exit(1);
+});
+
+monitor.iniciar();
+if (cola) cola.iniciar();
+setInterval(() => discovery.ubicar(), INTERVALO_DISCOVERY_MS);
+if (actualizador) actualizador.iniciar();
+heartbeat.evento("agent_started", { Version: VERSION });
+heartbeat.iniciar();
+
+if (SUPERVISADO) {
+  const idSupervisor = process.ppid;
+  setInterval(() => {
+    try {
+      process.kill(idSupervisor, 0); // 0 = solo pregunta si existe
+    } catch {
+      log("El supervisor ya no existe; se sale para que el servicio arranque limpio");
+      process.exit(0);
+    }
+  }, REVISAR_SUPERVISOR_MS).unref();
+}
+
+// CAMBIO DE RED: escucha en todas, así que no hace falta reiniciar. Se registra y se buscan las impresoras.
+setInterval(() => {
+  const ahora = ipsLocales();
+  if (ahora.join(",") === ipsActuales.join(",")) return;
+  const antes = ipsActuales;
+  ipsActuales = ahora;
+  log(`La red de la PC cambió: [${antes.join(", ") || "sin red"}] → [${ahora.join(", ") || "sin red"}]`);
+  discovery.ubicar({ forzarBarrido: true });
+  // La nube corrige el host del servidor de impresión de las cajas con la IP nueva (IpLocal).
+  avisarANube("agent_ip_changed", { IpsAnteriores: antes, IpsNuevas: ahora, IpLocal: ipDelLocal() });
+}, INTERVALO_REVISION_RED_MS);
+
+// ---------------------------------------------------------------------------------------------------
+// AVISO EN PANTALLA (igual que la versión anterior)
+// ---------------------------------------------------------------------------------------------------
+
+function showDialogInfoCMD(message) {
   const command = `echo ${message}`;
   exec.exec(
     `start "YaloPrinterService" cmd /c "${command} && timeout /t 10 > nul"`,
@@ -157,8 +589,7 @@ const showDialogInfoCMD = (message) => {
       }
       if (stderr) {
         console.error(`stderr: ${stderr}`);
-        return;
       }
     }
   );
-};
+}
