@@ -13,6 +13,8 @@ const { DISCOVERY } = require("./registro-impresoras");
 const { RESULTADO } = require("./envio");
 
 const INTERVALO_REVISION_MS = 15000;
+/** Errores que solo ve DLE EOT: la impresora sigue aceptando conexiones y datos con ellos. */
+const ESTADOS_CON_PAPEL_O_TAPA = new Set([ESTADO.ERROR_TAPA, ESTADO.ERROR_PAPEL, ESTADO.ERROR]);
 
 /**
  * @typedef {{ estado: string, desde: string, detalle: object, soportaEstado: boolean | null, revisadaEn: string | null }} EstadoImpresora
@@ -75,6 +77,10 @@ class MonitorImpresoras {
     if (resultado === RESULTADO.IMPRESO) {
       // Imprimió: está online, salvo que ya se sepa algo más fino (p. ej. papel por acabarse).
       const actual = this.estados.get(imp.clave);
+      // Con la tapa abierta o sin papel la impresora igual acepta la conexión y los datos (los guarda
+      // hasta que se resuelve). Que "imprimió" no borre ese error: lo aclara la próxima consulta DLE EOT.
+      // Visto el 12-nov: un Reconectar con la tapa abierta la pasaba a online hasta la revisión siguiente.
+      if (actual && ESTADOS_CON_PAPEL_O_TAPA.has(actual.estado)) return;
       const detalle = actual && actual.estado === ESTADO.ONLINE ? actual.detalle : {};
       this.registrar(imp, ESTADO.ONLINE, detalle, actual ? actual.soportaEstado : null);
       return;

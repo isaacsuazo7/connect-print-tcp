@@ -60,6 +60,23 @@ test("tapa abierta → error_cover; al cerrarla vuelve a online", async () => {
   assert.deepEqual(transiciones, ["unknown→online", "online→error_cover", "error_cover→online"]);
 });
 
+test("con la tapa abierta, una impresión aceptada no la pasa a online (solo DLE EOT la aclara)", async () => {
+  const imp = await crearImpresora({ modo: "ok" });
+  const { registro, monitor, transiciones } = armar([imp]);
+  const [registrada] = registro.lista();
+  await monitor.revisarTodas();
+  imp.estado[1] = con(3);
+  imp.estado[2] = con(2);
+  await monitor.revisarTodas();
+  monitor.registrarEnvio(registrada, RESULTADO.IMPRESO); // p. ej. el chequeo de Reconectar
+  assert.equal(monitor.estadoDe(registrada).estado, ESTADO.ERROR_TAPA);
+  imp.estado[1] = 0x16;
+  imp.estado[2] = FIJOS;
+  await monitor.revisarTodas();
+  await imp.cerrar();
+  assert.deepEqual(transiciones, ["unknown→online", "online→error_cover", "error_cover→online"]);
+});
+
 test("sin papel → error_paper", async () => {
   const imp = await crearImpresora({ modo: "ok", estado: { 1: con(3), 4: con(5, 6) } });
   const { registro, monitor } = armar([imp]);

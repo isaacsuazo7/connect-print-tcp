@@ -65,6 +65,12 @@ const ESPERA_ENTRE_RESCATES_MS = 30000;
 const SUPERVISADO = process.env.YALO_AGENT_SUPERVISADO === "1" && Boolean(process.env.YALO_AGENT_RAIZ);
 /** Si el supervisor muere (no debería), el agente sale para no quedar huérfano ocupando el puerto. */
 const REVISAR_SUPERVISOR_MS = 5000;
+/**
+ * Tamaño máximo de un pedido (el ticket va en base64 dentro del JSON). El servicio anterior usaba el de
+ * body-parser por defecto (100 KB) y rechazaba con 413 tickets de más de ~75 KB, p. ej. con logo
+ * (hallazgo del 10-nov). 10 MB alcanza para cualquier ticket con imágenes.
+ */
+const TAMANO_MAXIMO_PEDIDO = "10mb";
 /** /agent/restart espera a que terminen los trabajos en curso, como mucho esto. */
 const ESPERA_MAXIMA_REINICIO_MS = 5000;
 
@@ -291,7 +297,7 @@ const imprimirAhora = (impresora, datos) =>
 const app = express();
 const proteccion = crearProteccion(() => configuracion, () => identidad.tokenLocal);
 app.use(proteccion.cors);
-app.use(bodyParser.json());
+app.use(bodyParser.json({ limit: TAMANO_MAXIMO_PEDIDO }));
 app.use(proteccion.token);
 
 const soloDesdeEstaPc = (req, res, next) => {

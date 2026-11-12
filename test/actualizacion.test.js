@@ -127,6 +127,31 @@ test("firma inválida: no descarga nada y avisa una sola vez", async () => {
   await act.ofrecer(mala);
   assert.equal(registro.descargas, 0);
   assert.equal(registro.eventos.filter((e) => e.tipo === "update_rejected").length, 1);
+  assert.deepEqual(act.resumen().VersionesFallidas, ["1.4.0"], "la nube deja de ofrecerla");
+});
+
+test("firma inválida: queda como fallida y una corrección más vieja sí llega", async () => {
+  const { act, registro } = armar();
+  await act.ofrecer(oferta({ Version: "1.5.0", Firma: firmar(CLAVE_PRIVADA, "9.9.9", SHA_NUEVO) }));
+  // La nube ya no ofrece 1.5.0 (está en VersionesFallidas) y ofrece la 1.4.0 bien firmada.
+  await act.ofrecer(oferta({ Version: "1.4.0" }));
+  assert.equal(registro.reinicios, 1);
+});
+
+test("SHA distinto 3 veces seguidas: el archivo publicado está mal, queda como fallida", async () => {
+  const { act, registro } = armar({ contenido: Buffer.from("otro exe") });
+  await act.ofrecer(oferta());
+  for (let i = 0; i < 2; i++) {
+    act.pendiente.reintentarDesde = 0; // sin esperar los 5 min
+    await act.avanzar();
+  }
+  assert.equal(registro.descargas, 3);
+  assert.equal(act.pendiente, null);
+  assert.deepEqual(act.resumen().VersionesFallidas, ["1.4.0"]);
+  const rechazo = registro.eventos.find((e) => e.tipo === "update_rejected");
+  assert.match(rechazo.Motivo, /SHA-256\) en 3 descargas/);
+  await act.ofrecer(oferta());
+  assert.equal(registro.descargas, 3, "no la vuelve a intentar");
 });
 
 test("el archivo descargado no coincide con el SHA firmado: se borra y no aplica", async () => {

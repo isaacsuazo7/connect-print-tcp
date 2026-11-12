@@ -27,6 +27,9 @@ const SIN_IMPRESIONES_MS = 60000;
 const ESPERA_TRAS_FALLO_DESCARGA_MS = 5 * 60000;
 const TIMEOUT_DESCARGA_MS = 10 * 60000;
 const TAMANO_MAXIMO_BYTES = 200 * 1024 * 1024;
+const MOTIVO_SHA_DISTINTO = "el archivo no coincide con el publicado (SHA-256)";
+/** Una descarga cortada da otro SHA: se reintenta. Si sigue distinto, el archivo publicado está mal. */
+const DESCARGAS_CON_SHA_DISTINTO_MAXIMAS = 3;
 const FORMATO_VENTANA = /^(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})$/;
 const MINUTOS_POR_HORA = 60;
 
@@ -150,11 +153,16 @@ class Actualizador {
     this.pendiente = null;
   }
 
-  rechazar(version) {
+  /**
+   * No se instala nunca y se anota como fallida: va en VersionesFallidas del heartbeat y la nube deja de
+   * ofrecerla. Si no, la nube la ofrecería para siempre y una corrección más vieja no llegaría nunca.
+   */
+  rechazar(version, motivo = "firma inválida") {
     if (this.rechazada === version) return;
     this.rechazada = version;
-    this.log(`Actualización a ${version} rechazada: la firma o la URL no son válidas`);
-    this.evento("update_rejected", { A: version, Motivo: "firma inválida" });
+    this.log(`Actualización a ${version} rechazada: ${motivo}`);
+    this.evento("update_rejected", { A: version, Motivo: motivo });
+    this.estado.modificar((e) => ({ ...e, fallidas: [...new Set([...(e.fallidas || []), version])] }));
   }
 
   /** Un paso: descargar si falta; si ya está, aplicar cuando sea el momento. */
@@ -177,6 +185,12 @@ class Actualizador {
     if (Date.now() < p.reintentarDesde) return false;
     const error = await this.descargar(p);
     if (this.pendiente !== p) return false; // la nube la canceló mientras bajaba
+    if (error === MOTIVO_SHA_DISTINTO) p.descargasConShaDistinto = (p.descargasConShaDistinto || 0) + 1;
+    if (p.descargasConShaDistinto >= DESCARGAS_CON_SHA_DISTINTO_MAXIMAS) {
+      this.pendiente = null;
+      this.rechazar(p.version, `${MOTIVO_SHA_DISTINTO} en ${p.descargasConShaDistinto} descargas`);
+      return false;
+    }
     if (error) {
       p.reintentarDesde = Date.now() + ESPERA_TRAS_FALLO_DESCARGA_MS;
       this.log(`Actualización a ${p.version}: no se pudo descargar (${error}); se reintenta en 5 min`);
@@ -216,7 +230,7 @@ class Actualizador {
       if (!respuesta.ok || !respuesta.body) return `el servidor respondió ${respuesta.status}`;
       const sha = await guardarCalculandoSha(respuesta.body, temporal);
       if (sha === null) return "el archivo es demasiado grande";
-      if (sha !== p.sha256) return "el archivo no coincide con el publicado (SHA-256)";
+      if (sha !== p.sha256) return MOTIVO_SHA_DISTINTO;
       fs.renameSync(temporal, destino);
       return null;
     } catch (error) {
