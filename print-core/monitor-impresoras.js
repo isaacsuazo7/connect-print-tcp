@@ -63,7 +63,10 @@ class MonitorImpresoras {
     this.enRevision.add(imp.clave);
     try {
       const r = await this.serializador.ejecutar(imp.clave, () => this.consultar(imp.ip, imp.puerto));
-      this.registrar(imp, this.estadoSegunDiscovery(imp, r.estado), r.detalle, r.soportaEstado);
+      // Sin conexión no se sabe si soporta DLE EOT: se deja lo que se sabía (o null). Antes quedaba en
+      // false y el inventario la contaba como "no soporta estado" (visto el 16-nov con "oficina" apagada).
+      const soportaEstado = r.estado === ESTADO.OFFLINE ? null : r.soportaEstado;
+      this.registrar(imp, this.estadoSegunDiscovery(imp, r.estado), r.detalle, soportaEstado);
       this.estados.get(imp.clave).latenciaMs = r.estado === ESTADO.OFFLINE ? null : r.ms ?? null;
     } catch (error) {
       this.log(`No se pudo revisar ${nombreDe(imp)}`, error);

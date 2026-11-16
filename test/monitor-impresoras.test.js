@@ -25,6 +25,23 @@ function armar(impresoras) {
   return { registro, monitor, transiciones };
 }
 
+test("apagada no dice si soporta estado: queda lo que se sabía o null (inventario)", async () => {
+  const imp = await crearImpresora({ modo: "ok" });
+  const { registro, monitor } = armar([imp]);
+  const [registrada] = registro.lista();
+
+  await monitor.revisarTodas();
+  assert.equal(monitor.estadoDe(registrada).soportaEstado, true);
+  await imp.cerrar();
+  await monitor.revisarTodas();
+  assert.equal(monitor.estadoDe(registrada).estado, ESTADO.OFFLINE);
+  assert.equal(monitor.estadoDe(registrada).soportaEstado, true, "lo que se sabía");
+
+  const { registro: otroRegistro, monitor: otroMonitor } = armar([imp]); // nunca contestó
+  await otroMonitor.revisarTodas();
+  assert.equal(otroMonitor.estadoDe(otroRegistro.lista()[0]).soportaEstado, null);
+});
+
 test("ciclo completo: online → apagada (offline) → encendida (online)", async () => {
   const imp = await crearImpresora({ modo: "ok" });
   const { registro, monitor, transiciones } = armar([imp]);

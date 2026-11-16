@@ -24,4 +24,7 @@ module.exports = {
   ...require("./actualizacion/estado-versiones"),
   ...require("./actualizacion/actualizador"),
   ...require("./actualizacion/clave-publica"),
+  ...require("./inventario/oui"),
+  ...require("./inventario/gs-i"),
+  ...require("./inventario/inventario"),
 };

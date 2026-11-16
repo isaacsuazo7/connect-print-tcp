@@ -113,12 +113,25 @@ class RegistroImpresoras {
 
   /**
    * Lista que manda la nube en la respuesta del heartbeat (ImpresoraParaAgente).
+   *
+   * La lista es completa: una impresora con código que la nube ya no manda se borró o se desactivó en la
+   * configuración (SAC la cambió, pasó a USB...). Se olvida, para no seguir vigilándola ni reportarla
+   * caída (alerta falsa a SAC; visto el 16-nov al borrar impresoras de prueba). Salvo las que
+   * `conservar` diga (p. ej. con trabajos pendientes en la cola: si no, la cola la volvería a crear).
+   * Las que no tienen código (solo IP, aprendidas del POS) no se tocan: la nube no las conoce.
+   *
    * @param {{ CodImpresora: number, Nombre?: string, Ip?: string, Puerto?: string, Mac?: string }[]} lista
+   * @param {{ conservar?: (imp: Impresora) => boolean }} [opciones]
+   * @returns {Impresora[]} las que se olvidaron
    */
-  sincronizarConNube(lista) {
+  sincronizarConNube(lista, { conservar = () => false } = {}) {
     for (const n of lista) {
       const puerto = Number(n.Puerto) || 9100;
-      const imp = this.buscarPorCodigo(n.CodImpresora) || (n.Ip && this.buscarPorIpConocida(n.Ip, puerto));
+      // Por IP solo se une con una que todavía no tiene código (la aprendió del POS). Una con OTRO código
+      // en esa IP es otra impresora: SAC borró la vieja y creó una nueva con la misma IP (16-nov: la nueva
+      // quedaba pegada al código viejo y nunca se vigilaba). La vieja se olvida más abajo.
+      const porIp = n.Ip ? this.buscarPorIpConocida(n.Ip, puerto) : null;
+      const imp = this.buscarPorCodigo(n.CodImpresora) || (porIp && !porIp.codImpresora ? porIp : null);
       if (!imp) {
         if (!n.Ip) continue;
         this.nueva({ codImpresora: n.CodImpresora, nombre: n.Nombre, ip: n.Ip, puerto, mac: n.Mac, origen: ORIGEN.NUBE });
@@ -136,7 +149,11 @@ class RegistroImpresoras {
       const macNube = normalizarMac(n.Mac);
       if (macNube) imp.mac = macNube;
     }
+    const enLaNube = new Set(lista.map((n) => n.CodImpresora));
+    const olvidadas = this.lista().filter((i) => i.codImpresora && !enLaNube.has(i.codImpresora) && !conservar(i));
+    for (const imp of olvidadas) this.impresoras.delete(imp.clave);
     this.guardar();
+    return olvidadas;
   }
 
   /** El discovery la vio por MAC en otra IP. */

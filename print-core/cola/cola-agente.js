@@ -246,6 +246,11 @@ class ColaAgente {
     return this.almacen.listar(filtro);
   }
 
+  /** Tiene algo esperando para salir por esa impresora. */
+  tienePendientes(printerId) {
+    return this.almacen.siguientePendiente(printerId) !== null;
+  }
+
   /** Para /health y el heartbeat: { pending, awaiting_confirm, ... } */
   totales() {
     return this.almacen.totales();

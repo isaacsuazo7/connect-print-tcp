@@ -33,6 +33,9 @@ const {
   HeartbeatNube,
   Actualizador,
   CLAVE_PUBLICA_ACTUALIZACIONES,
+  SIN_IMPRESIONES_MS,
+  TablaOui,
+  InventarioImpresoras,
 } = require("./print-core");
 
 // ---------------------------------------------------------------------------------------------------
@@ -192,7 +195,21 @@ try {
   console.error(new Date().toISOString(), "La cola no está disponible; se imprime al momento", error);
 }
 
-const impresorasConEstado = () => registro.lista().map((imp) => ({ ...imp, ...monitor.estadoDe(imp) }));
+// Inventario del parque (brief §8 Fase 2): fabricante por OUI y modelo / serie por GS I. Viaja en el
+// heartbeat. Pregunta solo con la cola vacía y sin impresiones en el último minuto.
+const tablaOui = new TablaOui({ archivoCorrecciones: path.join(CARPETA_DATOS, "fabricantes-oui.json"), log });
+const inventario = new InventarioImpresoras({
+  archivo: path.join(CARPETA_DATOS, "inventario.json"),
+  registro,
+  monitor,
+  serializador,
+  tablaOui,
+  estaOcupado: () => hayImpresionesEnCurso() || Date.now() - ultimaImpresion < SIN_IMPRESIONES_MS,
+  log,
+});
+
+const impresorasConEstado = () =>
+  registro.lista().map((imp) => ({ ...imp, ...monitor.estadoDe(imp), inventario: inventario.datosDe(imp) }));
 const ipDelLocal = () => ipPrincipal(ipsActuales, registro.lista().map((i) => i.ip));
 
 // HEARTBEAT (brief §6.2.6) contra la API de QA: Impresoras/Agentes/Heartbeat.
@@ -218,6 +235,7 @@ function reporteParaNube() {
         Estado: e.estado,
         Discovery: i.discovery,
         UltimaVez: i.vistaEn,
+        ...inventario.datosDe(i),
       };
     });
   return {
@@ -237,10 +255,18 @@ function reporteParaNube() {
 
 /** HeartbeatAgenteRespuesta: la lista de impresoras a vigilar y, cuando la nube lo mande, configuración. */
 function aplicarRespuestaNube(datos) {
-  if (Array.isArray(datos.Impresoras)) registro.sincronizarConNube(datos.Impresoras);
+  if (Array.isArray(datos.Impresoras)) {
+    const olvidadas = registro.sincronizarConNube(datos.Impresoras, {
+      conservar: (imp) => (cola ? cola.tienePendientes(imp.clave) : false),
+    });
+    for (const imp of olvidadas) {
+      log(`La impresora ${imp.nombre || imp.clave} (${imp.ip}) ya no está en la configuración del local: se deja de vigilar`);
+    }
+  }
   if (typeof datos.ExigirToken === "boolean") configuracion.exigirToken = datos.ExigirToken;
   if (typeof datos.RestringirCors === "boolean") configuracion.restringirCors = datos.RestringirCors;
   if (datos.TiemposCola && typeof datos.TiemposCola === "object") configuracion.tiemposCola = datos.TiemposCola;
+  if (Array.isArray(datos.FabricantesOui)) tablaOui.aplicarCorrecciones(datos.FabricantesOui);
   if (actualizador) actualizador.ofrecer(datos.Actualizacion || null);
 }
 
@@ -552,6 +578,7 @@ monitor.iniciar();
 if (cola) cola.iniciar();
 setInterval(() => discovery.ubicar(), INTERVALO_DISCOVERY_MS);
 if (actualizador) actualizador.iniciar();
+inventario.iniciar();
 heartbeat.evento("agent_started", { Version: VERSION });
 heartbeat.iniciar();
 

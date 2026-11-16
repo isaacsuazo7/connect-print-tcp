@@ -72,6 +72,37 @@ test("lista de la nube: crea, nombra y une con lo aprendido del POS", () => {
   assert.equal(r.lista().length, 2);
 });
 
+test("lo que la nube ya no manda se olvida, salvo lo que hay que conservar y lo que no tiene código", () => {
+  const r = new RegistroImpresoras(null);
+  r.resolverDestino({ ip: "10.0.30.99", puerto: 9100 }); // solo IP, del POS: la nube no la conoce
+  r.sincronizarConNube([
+    { CodImpresora: 12, Ip: "10.0.30.243", Puerto: "9100", Mac: MAC },
+    { CodImpresora: 13, Ip: "10.0.30.60", Puerto: "9100" },
+    { CodImpresora: 14, Ip: "10.0.30.61", Puerto: "9100" },
+  ]);
+
+  // SAC borró la 13 y la 14; la 14 todavía tiene trabajos en la cola.
+  const olvidadas = r.sincronizarConNube([{ CodImpresora: 12, Ip: "10.0.30.243", Puerto: "9100", Mac: MAC }], {
+    conservar: (imp) => imp.codImpresora === 14,
+  });
+
+  assert.deepEqual(olvidadas.map((i) => i.codImpresora), [13]);
+  assert.deepEqual(r.lista().map((i) => i.clave).sort(), ["cod:12", "cod:14", "ip:10.0.30.99:9100"]);
+});
+
+test("SAC borra una impresora y crea otra con la misma IP: la nueva entra con su código, la vieja se olvida", () => {
+  const r = new RegistroImpresoras(null);
+  r.sincronizarConNube([{ CodImpresora: 12, Nombre: "cocina", Ip: "10.0.30.60", Puerto: "9100", Mac: MAC }]);
+
+  const olvidadas = r.sincronizarConNube([{ CodImpresora: 20, Nombre: "cocina nueva", Ip: "10.0.30.60", Puerto: "9100" }]);
+
+  assert.deepEqual(olvidadas.map((i) => i.codImpresora), [12]);
+  const nueva = r.buscarPorCodigo(20);
+  assert.equal(nueva.nombre, "cocina nueva");
+  assert.equal(nueva.mac, null, "la MAC de la vieja no se hereda");
+  assert.deepEqual(r.lista().map((i) => i.clave), ["cod:20"]);
+});
+
 test("la nube corrige la IP a donde la encontramos: queda todo alineado", () => {
   const r = new RegistroImpresoras(null);
   r.sincronizarConNube([{ CodImpresora: 12, Ip: "10.0.30.243", Puerto: "9100", Mac: MAC }]);
