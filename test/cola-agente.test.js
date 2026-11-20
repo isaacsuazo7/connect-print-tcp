@@ -46,7 +46,7 @@ function armar({ resultados = [], archivo = ":memory:", estadoMonitor = ESTADO.O
 // ---- política (pura) ----
 
 test("política: los mismos tiempos que el POS", () => {
-  assert.deepEqual(tiemposDe("comanda"), { autoMs: 10 * MINUTO_MS, duroMs: 4 * HORA_MS });
+  assert.deepEqual(tiemposDe("comanda"), { autoMs: 2 * MINUTO_MS, duroMs: 4 * HORA_MS });
   assert.deepEqual(tiemposDe("proforma"), { autoMs: 10 * MINUTO_MS, duroMs: 1 * HORA_MS });
   assert.deepEqual(tiemposDe("factura"), { autoMs: 30 * MINUTO_MS, duroMs: 12 * HORA_MS });
   assert.deepEqual(tiemposDe("apartado"), tiemposDe("factura"));

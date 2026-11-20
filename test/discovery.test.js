@@ -107,3 +107,48 @@ test("qué barrer: solo la red de la PC donde hay impresoras (no la VPN); si nin
   const otraRed = [{ ip: "192.168.5.20", ipConocida: "192.168.5.20" }];
   assert.deepEqual(prefijosABarrer(otraRed, ["10.0.30.244", "172.27.253.176"], prefijo24), ["10.0.30", "172.27.253"]);
 });
+
+test("OBS-05: el POS manda una IP donde no hay nada y sin MAC: la encuentra con la MAC que tenía", async () => {
+  // La conocía en .243 con su MAC; el POS (config vieja / IP mal tipeada) la reconfigura a .199 sin MAC.
+  const registro = registroCon({ ip: "10.0.30.243", codImpresora: 12, mac: MAC });
+  registro.resolverDestino({ ip: "10.0.30.199", puerto: 9100, codImpresora: 12 });
+  const imp = registro.buscarPorCodigo(12);
+  assert.equal(imp.mac, null, "la MAC vieja no se sigue a ciegas");
+  assert.equal(imp.macAnterior, MAC);
+
+  const red = redFalsa({ antes: [{ ip: "10.0.30.243", mac: MAC }], responden: ["10.0.30.243"] });
+  const movidas = [];
+  await new Discovery({ registro, red, alMoverse: (c) => movidas.push(c) }).ubicar();
+  assert.equal(imp.ip, "10.0.30.243");
+  assert.equal(imp.mac, MAC);
+  assert.equal(imp.macAnterior, null);
+  assert.deepEqual(movidas.map((m) => [m.antes, m.despues]), [["10.0.30.199", "10.0.30.243"]]);
+});
+
+test("OBS-05: si la IP nueva SÍ responde, es otra impresora: aprende su MAC y no vuelve a la anterior", async () => {
+  const OTRA = "00:11:22:33:44:55";
+  const registro = registroCon({ ip: "10.0.30.243", codImpresora: 12, mac: MAC });
+  registro.resolverDestino({ ip: "10.0.30.60", puerto: 9100, codImpresora: 12 });
+  const imp = registro.buscarPorCodigo(12);
+
+  const red = redFalsa({
+    antes: [{ ip: "10.0.30.243", mac: MAC }, { ip: "10.0.30.60", mac: OTRA }],
+    responden: ["10.0.30.243", "10.0.30.60"],
+  });
+  await new Discovery({ registro, red }).ubicar();
+  assert.equal(imp.ip, "10.0.30.60");
+  assert.equal(imp.mac, OTRA);
+  assert.equal(imp.macAnterior, null);
+});
+
+test("OBS-05: con la MAC anterior en la tabla ARP la recupera sin barrer la red (sin freno de 30 s)", async () => {
+  const registro = registroCon({ ip: "10.0.30.243", codImpresora: 12, mac: MAC });
+  registro.resolverDestino({ ip: "10.0.30.199", puerto: 9100, codImpresora: 12 });
+  const imp = registro.buscarPorCodigo(12);
+  const red = redFalsa({ antes: [{ ip: "10.0.30.243", mac: MAC }], responden: ["10.0.30.243"] });
+
+  const cambio = await new Discovery({ registro, red }).recuperarConMacAnterior(imp);
+  assert.equal(imp.ip, "10.0.30.243");
+  assert.deepEqual([cambio.antes, cambio.despues], ["10.0.30.199", "10.0.30.243"]);
+  assert.equal(red.barridos.length, 0, "no barrió la red");
+});

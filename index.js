@@ -10,11 +10,17 @@ const express = require("express");
 const bodyParser = require("body-parser");
 const exec = require("child_process");
 const { version: VERSION } = require("./package.json");
+const { respondePing } = require("./print-core/red-local");
 const {
   enviarTrabajo,
   RESULTADO,
+  ERROR,
+  consultarEstado,
+  enviarRevisandoEstado,
+  esErrorFisico,
   SerializadorPorImpresora,
   RegistroImpresoras,
+  esIpDeImpresora,
   Discovery,
   DISCOVERY,
   MonitorImpresoras,
@@ -25,6 +31,7 @@ const {
   IdentidadAgente,
   ipDelCliente,
   esLoopback,
+  esDeEstaPc,
   ipPrincipal,
   RegistroEventos,
   comoTexto,
@@ -147,6 +154,9 @@ const discovery = new Discovery({
 let ultimoRescate = 0;
 
 const rescatar = () => {
+  // OBS-05 (20-nov): la consulta de estado antes del envío ya marca "offline" y eso arranca una búsqueda;
+  // el envío que la pide un instante después tiene que ESPERAR esa misma, no seguir de largo sin la IP nueva.
+  if (discovery.enCurso) return discovery.enCurso;
   if (Date.now() - ultimoRescate <= ESPERA_ENTRE_RESCATES_MS) return Promise.resolve([]);
   ultimoRescate = Date.now();
   return discovery.ubicar({ forzarBarrido: true });
@@ -157,6 +167,8 @@ const monitor = new MonitorImpresoras({
   registro,
   serializador,
   log,
+  // Trabada = contesta ping pero no acepta conexiones (QA 20-nov): /health lo dice con `enRed`.
+  hacerPing: respondePing,
   alCambiar: ({ impresora, de, a }) => {
     // Se cayó: puede que haya cambiado de IP. Buscarla ya.
     if (ESTADOS_SIN_CONEXION.has(a)) rescatar();
@@ -182,7 +194,7 @@ try {
     serializador,
     enviar: (t) => {
       marcarImpresion();
-      return enviarTrabajo(t);
+      return enviarSegunEstado(t.impresora, t);
     },
     monitor,
     log,
@@ -301,16 +313,34 @@ const buscarImpresora = (id) =>
  * Imprime al momento en donde esté la impresora. Si no conecta y se conoce su MAC, la busca en la red
  * y, si se movió, reintenta UNA vez en la IP nueva (seguro: "fallido" = no se mandó nada).
  */
+/**
+ * BUG-10 (QA 19-nov): pregunta el estado justo antes de mandar; sin papel o con la tapa abierta no manda
+ * nada y devuelve fallido con error sin_papel / tapa_abierta (ver envio-con-estado.js).
+ */
+async function enviarSegunEstado(impresora, trabajo) {
+  if (!impresora) return enviarTrabajo(trabajo);
+  const envio = await enviarRevisandoEstado(trabajo, {
+    enviar: enviarTrabajo,
+    consultar: consultarEstado,
+    conocido: monitor.estadoDe(impresora),
+  });
+  if (envio.consulta) monitor.registrarConsulta(impresora, envio.consulta);
+  return envio;
+}
+
 const imprimirAhora = (impresora, datos) =>
   serializador.ejecutar(impresora.clave, async () => {
     marcarImpresion();
-    let envio = await enviarTrabajo({ host: impresora.ip, puerto: impresora.puerto, datos });
-    if (envio.resultado === RESULTADO.FALLIDO && impresora.mac) {
+    let envio = await enviarSegunEstado(impresora, { host: impresora.ip, puerto: impresora.puerto, datos });
+    // Solo si no conectó: con papel o tapa la impresora está ahí, buscarla por MAC no cambia nada.
+    if (envio.resultado === RESULTADO.FALLIDO && envio.error === ERROR.SIN_CONEXION && (impresora.mac || impresora.macAnterior)) {
       const ipAntes = impresora.ip;
-      await rescatar();
-      if (impresora.ip !== ipAntes) envio = await enviarTrabajo({ host: impresora.ip, puerto: impresora.puerto, datos });
+      // OBS-05: primero la MAC anterior en la tabla ARP (rápido, sin freno); si no alcanza, la búsqueda completa.
+      await discovery.recuperarConMacAnterior(impresora);
+      if (impresora.ip === ipAntes) await rescatar();
+      if (impresora.ip !== ipAntes) envio = await enviarSegunEstado(impresora, { host: impresora.ip, puerto: impresora.puerto, datos });
     }
-    monitor.registrarEnvio(impresora, envio.resultado);
+    monitor.registrarEnvio(impresora, envio.resultado, envio.error);
     const capturarMac = !impresora.mac && impresora.discovery !== DISCOVERY.DEGRADADO;
     if (envio.resultado === RESULTADO.IMPRESO && capturarMac) discovery.ubicar(); // en segundo plano
     return envio;
@@ -323,6 +353,16 @@ const imprimirAhora = (impresora, datos) =>
 const app = express();
 const proteccion = crearProteccion(() => configuracion, () => identidad.tokenLocal);
 app.use(proteccion.cors);
+// OBS-14 (QA 19-nov): solo se atiende a esta PC. Las tablets imprimen directo con la APK y ningún local usa
+// otra PC imprimiendo a través de esta (confirmado el 20-nov); antes cualquier equipo de la red podía imprimir.
+app.use((req, res, next) => {
+  if (esDeEstaPc(req.socket.remoteAddress, ipsActuales)) {
+    next();
+    return;
+  }
+  log(`Rechazado: ${req.method} ${req.path} desde ${ipDelCliente(req.socket.remoteAddress)} (solo se atiende a esta PC)`);
+  res.status(STATUS.PROHIBIDO).send({ message: "Solo se permite desde esta PC" });
+});
 app.use(bodyParser.json({ limit: TAMANO_MAXIMO_PEDIDO }));
 app.use(proteccion.token);
 
@@ -343,6 +383,8 @@ app.get("/health", (req, res) => {
     nombre: i.nombre,
     ip: i.ip,
     estado: i.estado,
+    // Offline pero contesta ping: trabada (el POS dice "apágala y préndela" en vez de revisar cables).
+    enRed: i.estado === ESTADO.OFFLINE && !!(i.detalle && i.detalle.enRed),
   }));
   res.status(STATUS.OK).send({
     servicio: NOMBRE_SERVICIO,
@@ -389,6 +431,12 @@ app.post("/print", async (req, res) => {
     res.status(STATUS.PEDIDO_INVALIDO).send({ message: "Faltan printerHost, printerPort o dataToPrint" });
     return;
   }
+  // OBS-04: la prueba de Reconectar va a 0.0.0.0. Mismo 502 de siempre (el POS lo toma como "el servicio
+  // contestó"), pero sin registrarla como impresora: antes quedaba una fantasma vigilada para siempre.
+  if (!esIpDeImpresora(printerHost)) {
+    res.status(STATUS.SIN_CONEXION_IMPRESORA).send({ message: "No es la IP de una impresora", error: ERROR.SIN_CONEXION });
+    return;
+  }
   const datos = Buffer.from(dataToPrint, "base64");
   if (jobId !== undefined && cola) {
     encolarPedido(req.body, datos, res);
@@ -404,7 +452,7 @@ app.post("/print", async (req, res) => {
       res.status(STATUS.OK).send({ message: "Impresión exitosa" });
       return;
     }
-    if (envio.resultado === RESULTADO.FALLIDO) {
+    if (envio.resultado === RESULTADO.FALLIDO && !esErrorFisico(envio.error)) {
       // Mismo aviso en la PC que antes cuando no se podía conectar.
       showDialogInfoCMD(
         `Error al conectar con la impresora http://${printerHost}/${puerto}, verifica que el YALO Printer Service este conectado a la misma red que la impresora.`
@@ -528,7 +576,7 @@ app.post("/test-print/:printerId", async (req, res) => {
   });
   const envio = await imprimirAhora(impresora, datos);
   log(`/test-print ${impresora.clave} #${secuencia} -> ${envio.resultado}`);
-  res.status(STATUS_POR_RESULTADO[envio.resultado]).send({ secuencia, resultado: envio.resultado, message: envio.detalle });
+  res.status(STATUS_POR_RESULTADO[envio.resultado]).send({ secuencia, resultado: envio.resultado, message: envio.detalle, error: envio.error });
 });
 
 // AGENT/RESTART: termina lo que está imprimiendo y sale; el servicio de Windows (nssm) lo levanta en ~5 s.

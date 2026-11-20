@@ -212,3 +212,73 @@ test("un error en quien escucha los cambios no rompe el monitor", async () => {
   await imp.cerrar();
   assert.equal(monitor.estadoDe(registro.lista()[0]).estado, ESTADO.ONLINE);
 });
+
+test("trabada: no acepta conexiones pero contesta ping → offline con enRed (QA 20-nov)", async () => {
+  const imp = await crearImpresora({ modo: "ok" });
+  const { host, puerto } = imp;
+  await imp.cerrar(); // puerto cerrado, como "oficina" trabada
+  for (const [ping, enRed] of [[true, true], [false, undefined]]) {
+    const registro = new RegistroImpresoras(null);
+    registro.resolverDestino({ ip: host, puerto });
+    const [registrada] = registro.lista();
+    const monitor = new MonitorImpresoras({
+      registro,
+      serializador: new SerializadorPorImpresora(),
+      consultar: (ip, p) => consultarEstado(ip, p, RAPIDO),
+      hacerPing: async () => ping,
+    });
+    await monitor.revisarTodas();
+    assert.equal(monitor.estadoDe(registrada).estado, ESTADO.OFFLINE);
+    assert.equal(monitor.estadoDe(registrada).detalle.enRed, enRed);
+    // Un envío fallido después no borra lo que se supo por el ping.
+    monitor.registrarEnvio(registrada, RESULTADO.FALLIDO, "printer_offline");
+    assert.equal(monitor.estadoDe(registrada).detalle.enRed, enRed);
+  }
+});
+
+test("OBS-03: un 'error' genérico mientras imprime no se informa si en 10 s ya está bien", async () => {
+  // Bit 3 de n=1 ("no lista") sin papel, tapa ni cortador: así contesta ocupada imprimiendo una factura grande.
+  const imp = await crearImpresora({ modo: "ok" });
+  const registro = new RegistroImpresoras(null);
+  registro.resolverDestino({ ip: imp.host, puerto: imp.puerto });
+  const [registrada] = registro.lista();
+  let reloj = 0;
+  const transiciones = [];
+  const monitor = new MonitorImpresoras({
+    registro,
+    serializador: new SerializadorPorImpresora(),
+    consultar: (ip, p) => consultarEstado(ip, p, RAPIDO),
+    alCambiar: (t) => transiciones.push(`${t.de}→${t.a}`),
+    ahora: () => reloj,
+  });
+  await monitor.revisarTodas();
+  assert.equal(monitor.estadoDe(registrada).estado, ESTADO.ONLINE);
+
+  imp.estado[1] = con(3); // ocupada
+  await monitor.revisarTodas(); // primera lectura: sospecha
+  reloj += 1000;
+  await monitor.revisarTodas(); // 1 s después (p. ej. la consulta antes de otro ticket): todavía no
+  assert.equal(monitor.estadoDe(registrada).estado, ESTADO.ONLINE);
+
+  imp.estado[1] = FIJOS; // terminó de imprimir
+  reloj += 15000;
+  await monitor.revisarTodas();
+  assert.equal(monitor.estadoDe(registrada).estado, ESTADO.ONLINE);
+  assert.deepEqual(transiciones, ["unknown→online"], "nunca pasó por error");
+
+  imp.estado[1] = con(3); // ahora un error de verdad: sigue 10 s después
+  await monitor.revisarTodas();
+  reloj += 15000;
+  await monitor.revisarTodas();
+  assert.equal(monitor.estadoDe(registrada).estado, ESTADO.ERROR);
+  await imp.cerrar();
+});
+
+test("OBS-03: sin papel y tapa abierta se informan al instante (no esperan confirmación)", async () => {
+  const imp = await crearImpresora({ modo: "ok", estado: { 1: con(3), 4: con(5, 6) } });
+  const { registro, monitor } = armar([imp]);
+  const [registrada] = registro.lista();
+  await monitor.revisarTodas();
+  assert.equal(monitor.estadoDe(registrada).estado, ESTADO.ERROR_PAPEL);
+  await imp.cerrar();
+});

@@ -24,6 +24,7 @@ const DISCOVERY = Object.freeze({ OK: "ok", DEGRADADO: "discovery_degraded", NO_
  * @property {number|null} codImpresora
  * @property {string|null} nombre
  * @property {string|null} mac
+ * @property {string|null} [macAnterior] la que tenía antes de que el POS la reconfigurara (OBS-05)
  * @property {string} ipConocida
  * @property {string} ip
  * @property {number} puerto
@@ -34,6 +35,16 @@ const DISCOVERY = Object.freeze({ OK: "ok", DEGRADADO: "discovery_degraded", NO_
 
 const claveDe = (codImpresora, ip, puerto) =>
   Number.isInteger(codImpresora) && codImpresora > 0 ? `cod:${codImpresora}` : `ip:${ip}:${puerto}`;
+
+/**
+ * ¿Puede ser la IP de una impresora? OBS-04 (QA 19-nov): Reconectar del POS identifica el servicio con un
+ * /print de prueba a 0.0.0.0 cuando no puede leer /health; eso quedaba registrado como una impresora sin
+ * nombre que se vigilaba para siempre (siempre "offline"). 0.0.0.0 o vacía no es una impresora.
+ * @param {unknown} ip
+ */
+function esIpDeImpresora(ip) {
+  return typeof ip === "string" && ip.trim() !== "" && ip.trim() !== "0.0.0.0";
+}
 
 class RegistroImpresoras {
   /** @param {string | null} archivo null = solo en memoria (pruebas) */
@@ -48,7 +59,8 @@ class RegistroImpresoras {
     if (!this.archivo || !fs.existsSync(this.archivo)) return;
     try {
       const lista = JSON.parse(fs.readFileSync(this.archivo, "utf8"));
-      for (const imp of Array.isArray(lista) ? lista : []) this.impresoras.set(imp.clave, imp);
+      // OBS-04: las fantasmas que quedaron guardadas antes del arreglo (0.0.0.0) se olvidan al arrancar.
+      for (const imp of Array.isArray(lista) ? lista : []) if (esIpDeImpresora(imp.ip)) this.impresoras.set(imp.clave, imp);
     } catch (error) {
       // Archivo roto (corte de luz a mitad de escritura): se empieza de cero y se reaprende.
       console.error(new Date().toISOString(), "Registro de impresoras ilegible, se empieza vacío", error.message);
@@ -166,6 +178,7 @@ class RegistroImpresoras {
     const normalizada = normalizarMac(mac);
     if (!normalizada || imp.mac === normalizada) return;
     imp.mac = normalizada;
+    imp.macAnterior = null; // la IP nueva respondió: es esta impresora, la anterior ya no cuenta (OBS-05)
     this.guardar();
   }
 
@@ -203,14 +216,29 @@ class RegistroImpresoras {
     this.guardar();
   }
 
+  /**
+   * La MAC vieja no se sigue (si cambiaron la impresora por otra, llevaría los tickets a la anterior): se
+   * vuelve a capturar en la IP nueva. Pero se guarda aparte en `macAnterior`. OBS-05 (QA 19-nov, visto el
+   * 20-nov): un POS con la IP vieja / equivocada "reconfiguraba" y el primer ticket fallaba sin buscarla por
+   * MAC. El discovery solo usa `macAnterior` si la IP nueva NO responde (ver Discovery.capturarMac).
+   */
   reconfigurar(imp, ip, puerto, mac) {
+    const macPos = normalizarMac(mac);
+    imp.macAnterior = macPos ? null : imp.mac || imp.macAnterior || null;
     imp.ipConocida = ip;
     imp.ip = ip;
     imp.puerto = puerto;
-    imp.mac = normalizarMac(mac); // la MAC vieja ya no vale: se vuelve a capturar en la IP nueva
+    imp.mac = macPos;
     imp.discovery = null;
+    this.guardar();
+  }
+
+  /** La IP nueva no responde y la MAC anterior está en otra IP: es la misma impresora (OBS-05). */
+  recuperarMacAnterior(imp) {
+    imp.mac = imp.macAnterior;
+    imp.macAnterior = null;
     this.guardar();
   }
 }
 
-module.exports = { RegistroImpresoras, ORIGEN, DISCOVERY };
+module.exports = { RegistroImpresoras, ORIGEN, DISCOVERY, esIpDeImpresora };

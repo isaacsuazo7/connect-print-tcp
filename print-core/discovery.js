@@ -66,7 +66,7 @@ class Discovery {
     // Solo una impresora con MAC conocida que no está donde se esperaba justifica barrer la red. Las que
     // no tienen MAC se capturan con la conexión directa (no hace falta barrer), y barrer cada minuto por
     // una impresora de otra red que nunca va a aparecer en el ARP sería ruido.
-    const falta = impresoras.some((i) => i.mac && !ipsDeMac(tabla, i.mac).includes(i.ip));
+    const falta = impresoras.some((i) => (i.mac && !ipsDeMac(tabla, i.mac).includes(i.ip)) || (!i.mac && i.macAnterior));
     if (forzarBarrido || falta) {
       await this.red.barrer(prefijosABarrer(impresoras, this.red.ipsLocales(), this.red.prefijo24));
       tabla = await this.red.leerTablaArp();
@@ -82,8 +82,7 @@ class Discovery {
 
   async ubicarUna(imp, tabla) {
     if (!imp.mac) {
-      await this.capturarMac(imp, tabla);
-      return null;
+      return this.capturarMac(imp, tabla);
     }
 
     let ips = ipsDeMac(tabla, imp.mac);
@@ -113,10 +112,13 @@ class Discovery {
     return null;
   }
 
+  /** @returns {Promise<{ impresora: object, antes: string, despues: string } | null>} si se movió (OBS-05) */
   async capturarMac(imp, tabla) {
     if (!(await this.red.puertoResponde(imp.ip, imp.puerto))) {
+      const recuperada = await this.buscarConMacAnterior(imp, tabla);
+      if (recuperada) return recuperada;
       this.cambiarEstado(imp, DISCOVERY.NO_ENCONTRADA, "no responde y todavía no se conoce su MAC");
-      return;
+      return null;
     }
     // Recién conectamos: la tabla ARP ya tiene su MAC (si está en la misma red de la PC).
     const mac = macDeIp(tabla, imp.ip) || macDeIp(await this.red.leerTablaArp(), imp.ip);
@@ -127,6 +129,37 @@ class Discovery {
     this.registro.aprenderMac(imp, mac);
     this.log(`MAC capturada ${imp.nombre || imp.clave}: ${mac}`);
     this.registro.marcarDiscovery(imp, DISCOVERY.OK);
+    return null;
+  }
+
+  /**
+   * OBS-05: un envío falló en la IP que mandó el POS y la impresora tiene MAC anterior. Sin barrer la red
+   * (eso tiene freno de 30 s): basta la tabla ARP de Windows, que ya la tiene si estuvo en la red hace poco.
+   * Así el ticket sale al primer intento aunque el POS siga mandando la IP vieja en cada venta.
+   */
+  async recuperarConMacAnterior(imp) {
+    if (imp.mac || !imp.macAnterior) return null;
+    return this.buscarConMacAnterior(imp, await this.red.leerTablaArp());
+  }
+
+  /**
+   * OBS-05: el POS la reconfiguró a una IP donde no hay nada (la vieja de su config o un error al tipear).
+   * Si la MAC que tenía antes está en otra IP, es la misma impresora: se mueve ahí. Solo cuando la IP nueva
+   * no responde: si responde, es otra impresora y se captura su MAC (capturarMac).
+   */
+  async buscarConMacAnterior(imp, tabla) {
+    if (!imp.macAnterior) return null;
+    const ips = await this.filtrarLasQueResponden(ipsDeMac(tabla, imp.macAnterior), imp.puerto);
+    if (ips.length === 0) return null;
+    const antes = imp.ip;
+    const despues = ips[0];
+    this.registro.recuperarMacAnterior(imp);
+    this.registro.moverA(imp, despues);
+    this.registro.marcarDiscovery(imp, DISCOVERY.OK);
+    const cambio = { impresora: imp, antes, despues };
+    this.log(`printer_ip_changed ${imp.nombre || imp.clave} (${imp.mac}, la MAC que tenía): ${antes} → ${despues}`);
+    this.alMoverse(cambio);
+    return cambio;
   }
 
   async filtrarLasQueResponden(ips, puerto) {

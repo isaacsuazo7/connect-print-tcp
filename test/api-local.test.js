@@ -94,3 +94,14 @@ test("ticket de prueba: secuencia, nombre, corte y SIN abrir gaveta", () => {
   assert.ok(t.includes(Buffer.from([0x1d, 0x56])), "corta");
   assert.ok(!t.includes(Buffer.from([0x1b, 0x70])), "no abre la gaveta (ESC p)");
 });
+
+test("OBS-14: solo se atiende a esta PC (loopback o una IP propia), no a otros equipos de la red", () => {
+  const { esDeEstaPc } = require("../print-core/red-del-agente");
+  const ips = ["10.0.30.244", "172.27.254.38"];
+  assert.equal(esDeEstaPc("127.0.0.1", ips), true);
+  assert.equal(esDeEstaPc("::1", ips), true);
+  assert.equal(esDeEstaPc("::ffff:127.0.0.1", ips), true);
+  assert.equal(esDeEstaPc("::ffff:10.0.30.244", ips), true, "el POS de esta PC por la IP pegada");
+  assert.equal(esDeEstaPc("10.0.30.50", ips), false, "otra PC o tablet de la red");
+  assert.equal(esDeEstaPc("::ffff:10.0.30.50", ips), false);
+});

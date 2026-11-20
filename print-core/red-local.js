@@ -79,4 +79,20 @@ function puertoResponde(ip, puerto, timeoutMs = TIMEOUT_PRUEBA_PUERTO_MS) {
   });
 }
 
-module.exports = { ipsLocales, prefijo24, barrer, leerTablaArp, puertoResponde };
+const TIMEOUT_PING_MS = 1000;
+
+/**
+ * ¿Contesta un ping? Para separar "apagada / desconectada" (no contesta nada) de "trabada" (contesta el
+ * ping pero no acepta conexiones en el 9100; visto con "oficina" el 20-nov-2026: se arregló apagándola).
+ * "TTL=" sale en la respuesta de ping de Windows en cualquier idioma; un "host inaccesible" no lo trae.
+ */
+function respondePing(ip, timeoutMs = TIMEOUT_PING_MS) {
+  const argumentos = process.platform === "win32" ? ["-n", "1", "-w", String(timeoutMs), ip] : ["-c", "1", "-W", "1", ip];
+  return new Promise((resolve) => {
+    execFile("ping", argumentos, { timeout: timeoutMs + 1500, windowsHide: true }, (error, stdout) => {
+      resolve(!error && /TTL=/i.test(String(stdout)));
+    });
+  });
+}
+
+module.exports = { ipsLocales, prefijo24, barrer, leerTablaArp, puertoResponde, respondePing };

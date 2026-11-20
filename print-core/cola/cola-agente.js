@@ -28,8 +28,8 @@ class ColaAgente {
    * @param {{ almacen: import("./almacen").AlmacenCola,
    *           registro: import("../registro-impresoras").RegistroImpresoras,
    *           serializador: import("../serializador").SerializadorPorImpresora,
-   *           enviar: (t: { host: string, puerto: number, datos: Buffer }) => Promise<{ resultado: string, error: string|null, detalle: string }>,
-   *           monitor?: { estadoDe: (imp: object) => { estado: string }, registrarEnvio: (imp: object, r: string) => void },
+   *           enviar: (t: { host: string, puerto: number, datos: Buffer, impresora: object }) => Promise<{ resultado: string, error: string|null, detalle: string }>,
+   *           monitor?: { estadoDe: (imp: object) => { estado: string }, registrarEnvio: (imp: object, r: string, error?: string|null) => void },
    *           alDescargar?: (d: { impresora: object, impresos: number }) => void,
    *           ttlNube?: () => Record<string, { autoMs?: number, duroMs?: number }>,
    *           ahora?: () => number,
@@ -215,9 +215,9 @@ class ColaAgente {
     this.almacen.actualizar(t.job_id, { status: ESTADO_TRABAJO.IMPRIMIENDO });
 
     const envio = await this.serializador.ejecutar(printerId(impresora, t), () =>
-      this.enviar({ host: impresora.ip, puerto: impresora.puerto, datos })
+      this.enviar({ host: impresora.ip, puerto: impresora.puerto, datos, impresora })
     );
-    if (this.monitor) this.monitor.registrarEnvio(impresora, envio.resultado);
+    if (this.monitor) this.monitor.registrarEnvio(impresora, envio.resultado, envio.error);
     const intentos = Number(t.attempts) + 1;
 
     if (envio.resultado === RESULTADO.IMPRESO) {

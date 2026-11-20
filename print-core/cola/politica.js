@@ -33,7 +33,8 @@ const TIEMPOS_CIERRE = { autoMs: 60 * MINUTO_MS, duroMs: 24 * HORA_MS };
 const TIEMPOS_POR_DEFECTO = { autoMs: 10 * MINUTO_MS, duroMs: 24 * HORA_MS }; // igual que el POS
 
 const TIEMPOS_POR_TIPO = Object.freeze({
-  [TIPO.COMANDA]: { autoMs: 10 * MINUTO_MS, duroMs: 4 * HORA_MS },
+  // OBS-07 (QA 19-nov, decisión del 20-nov): igual que el POS, la comanda sale sola solo hasta los 2 min.
+  [TIPO.COMANDA]: { autoMs: 2 * MINUTO_MS, duroMs: 4 * HORA_MS },
   [TIPO.PROFORMA]: { autoMs: 10 * MINUTO_MS, duroMs: 1 * HORA_MS },
   [TIPO.FACTURA]: TIEMPOS_FACTURA,
   [TIPO.APARTADO]: TIEMPOS_FACTURA,

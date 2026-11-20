@@ -28,4 +28,15 @@ function ipPrincipal(ipsDeLaPc, ipsDeImpresoras) {
   return ordenadas[0];
 }
 
-module.exports = { ipDelCliente, esLoopback, ipPrincipal };
+/**
+ * ¿El pedido viene de esta misma PC? OBS-14 (QA 19-nov, decisión del 20-nov): solo imprime la PC del
+ * servicio (las tablets usan la APK, que imprime directo). Desde esta PC el POS puede llegar por 127.0.0.1
+ * o por una IP de la propia PC (la IP pegada en Servidor de impresoras, la app de escritorio): las dos valen.
+ * @param {string} direccionRemota req.socket.remoteAddress
+ * @param {string[]} ipsDeLaPc
+ */
+function esDeEstaPc(direccionRemota, ipsDeLaPc) {
+  return esLoopback(direccionRemota) || ipsDeLaPc.includes(ipDelCliente(direccionRemota));
+}
+
+module.exports = { ipDelCliente, esLoopback, ipPrincipal, esDeEstaPc };

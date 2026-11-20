@@ -129,3 +129,22 @@ test("se guarda en disco y sobrevive un reinicio; archivo roto = empieza vacío 
   assert.equal(new RegistroImpresoras(archivo).lista().length, 0);
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test("OBS-04: 0.0.0.0 o vacía no es una impresora; las fantasmas guardadas se olvidan al arrancar", () => {
+  const { esIpDeImpresora } = require("../print-core/registro-impresoras");
+  assert.equal(esIpDeImpresora("10.0.30.243"), true);
+  assert.equal(esIpDeImpresora("0.0.0.0"), false);
+  assert.equal(esIpDeImpresora(""), false);
+  assert.equal(esIpDeImpresora(null), false);
+
+  const fs = require("fs");
+  const os = require("os");
+  const path = require("path");
+  const archivo = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "registro-")), "impresoras.json");
+  fs.writeFileSync(archivo, JSON.stringify([
+    { clave: "cod:977", codImpresora: 977, ip: "10.0.30.243", ipConocida: "10.0.30.243", puerto: 9100 },
+    { clave: "ip:0.0.0.0:9100", codImpresora: null, ip: "0.0.0.0", ipConocida: "0.0.0.0", puerto: 9100 },
+  ]));
+  const registro = new RegistroImpresoras(archivo);
+  assert.deepEqual(registro.lista().map((i) => i.clave), ["cod:977"]);
+});
