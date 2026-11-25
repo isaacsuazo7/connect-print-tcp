@@ -19,6 +19,12 @@ const ERROR_POR_ESTADO = Object.freeze({
   [ESTADO.ERROR_TAPA]: ERROR_FISICO.TAPA_ABIERTA,
 });
 
+/**
+ * BUG-17 (QA ronda 3, 25-nov): en la IP contesta OTRA impresora (otra MAC). Se tomó la IP vieja de esta y la
+ * comanda salía en la equivocada con "Impresión exitosa". No se manda; quien llama busca la correcta por MAC.
+ */
+const ERROR_OTRA_IMPRESORA = "otra_impresora";
+
 const DETALLE_POR_ERROR = Object.freeze({
   [ERROR_FISICO.SIN_PAPEL]: "La impresora está sin papel: no se mandó nada",
   [ERROR_FISICO.TAPA_ABIERTA]: "La impresora tiene la tapa abierta: no se mandó nada",
@@ -40,12 +46,17 @@ const esErrorFisico = (error) => error === ERROR_FISICO.SIN_PAPEL || error === E
  * @param {{ host: string, puerto: number, datos: Uint8Array }} trabajo
  * @param {{ enviar: (t: object) => Promise<{ resultado: string, error: string|null, detalle: string, ms: number }>,
  *           consultar: (host: string, puerto: number, opciones: object) => Promise<{ estado: string, soportaEstado: boolean, detalle: object, ms: number }>,
- *           conocido: { estado: string, soportaEstado: boolean | null } }} deps
+ *           conocido: { estado: string, soportaEstado: boolean | null },
+ *           verificarDestino?: (host: string) => Promise<string | null> }} deps
+ *   `verificarDestino`: null si en `host` está la impresora esperada; si no, el motivo (BUG-17). Va DESPUÉS de
+ *   conectarse a preguntar el estado: esa conexión deja la tabla ARP al día con quién está en esa IP.
  * @returns {Promise<{ resultado: string, error: string|null, detalle: string, ms: number, consulta: object|null }>}
  *   `consulta` = lo que contestó la impresora (para el monitor), o null si no se le preguntó.
  */
-async function enviarRevisandoEstado(trabajo, { enviar, consultar, conocido }) {
+async function enviarRevisandoEstado(trabajo, { enviar, consultar, conocido, verificarDestino = async () => null }) {
   if (conocido.soportaEstado === false) {
+    const otra = await verificarDestino(trabajo.host);
+    if (otra) return { ...fallidoPorOtraImpresora(otra, 0), consulta: null };
     return { ...(await enviar(trabajo)), consulta: null };
   }
   const consulta = await consultar(trabajo.host, trabajo.puerto, OPCIONES_CONSULTA);
@@ -62,7 +73,13 @@ async function enviarRevisandoEstado(trabajo, { enviar, consultar, conocido }) {
   if (error) {
     return { resultado: RESULTADO.FALLIDO, error, detalle: DETALLE_POR_ERROR[error], ms: consulta.ms, consulta };
   }
+  const otra = await verificarDestino(trabajo.host);
+  if (otra) return { ...fallidoPorOtraImpresora(otra, consulta.ms), consulta };
   return { ...(await enviar(trabajo)), consulta };
+}
+
+function fallidoPorOtraImpresora(detalle, ms) {
+  return { resultado: RESULTADO.FALLIDO, error: ERROR_OTRA_IMPRESORA, detalle, ms };
 }
 
 /** Lo que contestó recién; si no contestó DLE EOT (ocupada o clon), lo último que se sabía. */
@@ -71,4 +88,4 @@ function estadoParaDecidir(consulta, conocido) {
   return conocido.estado;
 }
 
-module.exports = { enviarRevisandoEstado, esErrorFisico, ERROR_FISICO };
+module.exports = { enviarRevisandoEstado, esErrorFisico, ERROR_FISICO, ERROR_OTRA_IMPRESORA };

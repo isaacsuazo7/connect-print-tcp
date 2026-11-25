@@ -19,6 +19,7 @@ const {
   enviarRevisandoEstado,
   terminaAntesDe,
   esErrorFisico,
+  ERROR_OTRA_IMPRESORA,
   SerializadorPorImpresora,
   RegistroImpresoras,
   esIpDeImpresora,
@@ -331,16 +332,40 @@ async function enviarSegunEstado(impresora, trabajo) {
     enviar: enviarTrabajo,
     consultar: consultarEstado,
     conocido: monitor.estadoDe(impresora),
+    verificarDestino: (host) => otraImpresoraEn(impresora, host),
   });
   if (envio.consulta) monitor.registrarConsulta(impresora, envio.consulta);
   return envio;
 }
 
-/** OBS-05: primero la MAC anterior en la tabla ARP (rápido, sin freno); si no alcanza, la búsqueda completa. */
+/**
+ * BUG-17 (QA ronda 3, 25-nov): si otra impresora tomó la IP vieja de esta, la comanda salía en la equivocada.
+ * Null si en `host` está la esperada o no se puede saber (sin MAC conocida, o sin entrada en la tabla ARP:
+ * otra red o AP isolation, igual que hoy). Si la tabla ve OTRA MAC, el motivo.
+ */
+async function otraImpresoraEn(impresora, host) {
+  if (!impresora.mac) return null;
+  const mac = await discovery.macEn(host);
+  if (!mac || mac === impresora.mac) return null;
+  const otra = registro.lista().find((i) => i.mac === mac && i !== impresora);
+  const quien = otra ? `"${otra.nombre || otra.clave}"` : `otro equipo (${mac})`;
+  log(`BUG-17: en ${host} está ${quien}, no "${impresora.nombre || impresora.clave}" (${impresora.mac}); no se imprime ahí`);
+  return `En ${host} contesta ${quien}, no esta impresora: no se mandó nada`;
+}
+
+/**
+ * Primero su MAC en la tabla ARP de ahora (BUG-17: otra tomó su IP), después la MAC anterior (OBS-05) y, si no
+ * alcanza, la búsqueda completa.
+ */
 async function buscarDondeEsta(impresora, ipAntes) {
-  await discovery.recuperarConMacAnterior(impresora);
+  await discovery.ubicarPorMac(impresora);
+  if (impresora.ip === ipAntes) await discovery.recuperarConMacAnterior(impresora);
   if (impresora.ip === ipAntes) await rescatar();
 }
+
+/** No conectó, u otra impresora contesta en su IP: buscarla por MAC puede llevar a la correcta. */
+const convieneBuscarla = (envio) =>
+  envio.resultado === RESULTADO.FALLIDO && (envio.error === ERROR.SIN_CONEXION || envio.error === ERROR_OTRA_IMPRESORA);
 
 const imprimirAhora = (impresora, datos) => {
   // BUG-12 (QA ronda 2): el envío tiene que contestar antes de que el POS se canse de esperar (10 s); si no,
@@ -349,8 +374,8 @@ const imprimirAhora = (impresora, datos) => {
   return serializador.ejecutar(impresora.clave, async () => {
     marcarImpresion();
     let envio = await enviarSegunEstado(impresora, { host: impresora.ip, puerto: impresora.puerto, datos });
-    // Solo si no conectó: con papel o tapa la impresora está ahí, buscarla por MAC no cambia nada.
-    if (envio.resultado === RESULTADO.FALLIDO && envio.error === ERROR.SIN_CONEXION && (impresora.mac || impresora.macAnterior)) {
+    // Solo si no conectó u otra contesta en su IP: con papel o tapa la impresora está ahí, buscarla no cambia nada.
+    if (convieneBuscarla(envio) && (impresora.mac || impresora.macAnterior)) {
       const ipAntes = impresora.ip;
       // La búsqueda tiene hasta dejar tiempo para reenviar. Si no termina, se contesta "sin conexión" (el POS la
       // deja pendiente) y la búsqueda sigue: si la encuentra, el próximo reintento ya va a la IP nueva.
@@ -471,7 +496,7 @@ app.post("/print", async (req, res) => {
       res.status(STATUS.OK).send({ message: "Impresión exitosa" });
       return;
     }
-    if (envio.resultado === RESULTADO.FALLIDO && !esErrorFisico(envio.error)) {
+    if (envio.resultado === RESULTADO.FALLIDO && !esErrorFisico(envio.error) && envio.error !== ERROR_OTRA_IMPRESORA) {
       // Mismo aviso en la PC que antes cuando no se podía conectar.
       showDialogInfoCMD(
         `Error al conectar con la impresora http://${printerHost}/${puerto}, verifica que el YALO Printer Service este conectado a la misma red que la impresora.`

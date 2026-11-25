@@ -152,3 +152,22 @@ test("OBS-05: con la MAC anterior en la tabla ARP la recupera sin barrer la red 
   assert.deepEqual([cambio.antes, cambio.despues], ["10.0.30.199", "10.0.30.243"]);
   assert.equal(red.barridos.length, 0, "no barrió la red");
 });
+
+// BUG-17 (QA ronda 3, 25-nov): otra impresora tomó la IP vieja; la correcta se busca por MAC sin barrer.
+test("macEn dice qué MAC hay en una IP; ubicarPorMac mueve la impresora a donde está su MAC", async () => {
+  const registro = registroCon({ ip: "192.168.10.100", codImpresora: 7, mac: "02:10:7B:1A:39:A0" });
+  const cocina = registro.buscarPorCodigo(7);
+  const red = redFalsa({
+    antes: [
+      { ip: "192.168.10.100", mac: "00:61:8F:6A:3A:5F" },
+      { ip: "192.168.10.241", mac: "02:10:7B:1A:39:A0" },
+    ],
+  });
+  const d = new Discovery({ registro, red });
+
+  assert.equal(await d.macEn("192.168.10.100"), "00:61:8F:6A:3A:5F");
+  const movida = await d.ubicarPorMac(cocina);
+  assert.equal(movida.despues, "192.168.10.241");
+  assert.equal(cocina.ip, "192.168.10.241");
+  assert.equal(red.barridos.length, 0, "no barrió la red");
+});

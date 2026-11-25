@@ -2,7 +2,7 @@
 // BUG-10 del reporte de QA (19-nov-2026): sin papel / tapa abierta no se manda nada y el resultado es fallido.
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
-const { enviarRevisandoEstado, esErrorFisico, ERROR_FISICO } = require("../print-core/envio-con-estado");
+const { enviarRevisandoEstado, esErrorFisico, ERROR_FISICO, ERROR_OTRA_IMPRESORA } = require("../print-core/envio-con-estado");
 const { consultarEstado, ESTADO } = require("../print-core/estado-impresora");
 const { enviarTrabajo, RESULTADO, ERROR } = require("../print-core/envio");
 const { MonitorImpresoras } = require("../print-core/monitor-impresoras");
@@ -115,4 +115,41 @@ test("monitor: una consulta sin respuesta DLE EOT no cambia si soporta estado (p
   monitor.registrarConsulta(registrada, { estado: ESTADO.ONLINE, soportaEstado: false, detalle: {} });
 
   assert.equal(monitor.estadoDe(registrada).soportaEstado, true);
+});
+
+// BUG-17 (QA ronda 3, 25-nov): otra impresora tomó la IP vieja de esta.
+test("otra impresora en la IP: no manda nada y devuelve fallido con error otra_impresora", async () => {
+  const imp = await crearImpresora();
+  const pedidas = [];
+  const envio = await enviarRevisandoEstado(
+    trabajoPara(imp),
+    deps(NADA_CONOCIDO, { verificarDestino: async (host) => (pedidas.push(host), "En 10.0.0.1 contesta \"Test\"") }),
+  );
+
+  assert.equal(envio.resultado, RESULTADO.FALLIDO);
+  assert.equal(envio.error, ERROR_OTRA_IMPRESORA);
+  assert.equal(imp.trabajos.length, 0, "la impresora equivocada no recibió el ticket");
+  assert.equal(pedidas.length, 1, "se verificó después de conectarse a preguntar el estado");
+  await imp.cerrar();
+});
+
+test("la impresora esperada en la IP: imprime normal", async () => {
+  const imp = await crearImpresora();
+  const envio = await enviarRevisandoEstado(trabajoPara(imp), deps(NADA_CONOCIDO, { verificarDestino: async () => null }));
+
+  assert.equal(envio.resultado, RESULTADO.IMPRESO);
+  assert.equal(imp.trabajos.length, 1);
+  await imp.cerrar();
+});
+
+test("clon sin DLE EOT con otra impresora en la IP: tampoco manda", async () => {
+  const imp = await crearImpresora();
+  const envio = await enviarRevisandoEstado(
+    trabajoPara(imp),
+    deps({ estado: ESTADO.ONLINE, soportaEstado: false }, { verificarDestino: async () => "otra" }),
+  );
+
+  assert.equal(envio.error, ERROR_OTRA_IMPRESORA);
+  assert.equal(imp.trabajos.length, 0);
+  await imp.cerrar();
 });

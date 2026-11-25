@@ -80,6 +80,21 @@ class Discovery {
     return movidas;
   }
 
+  /** MAC que la tabla ARP ve en esa IP, o null (sin entrada: otra red, AP isolation o nadie). BUG-17. */
+  async macEn(ip) {
+    return macDeIp(await this.red.leerTablaArp(), ip);
+  }
+
+  /**
+   * BUG-17: en su IP contesta otra impresora. Se la busca por su MAC en la tabla ARP de ahora (sin barrer:
+   * es rápido y no tiene freno). Si está en otra IP, se mueve ahí.
+   * @returns {Promise<{ impresora: object, antes: string, despues: string } | null>}
+   */
+  async ubicarPorMac(imp) {
+    if (!imp.mac) return null;
+    return this.ubicarUna(imp, await this.red.leerTablaArp());
+  }
+
   async ubicarUna(imp, tabla) {
     if (!imp.mac) {
       return this.capturarMac(imp, tabla);
