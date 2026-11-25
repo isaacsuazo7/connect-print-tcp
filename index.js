@@ -20,6 +20,7 @@ const {
   terminaAntesDe,
   esErrorFisico,
   ERROR_OTRA_IMPRESORA,
+  otraImpresoraEnIp,
   SerializadorPorImpresora,
   RegistroImpresoras,
   esIpDeImpresora,
@@ -340,17 +341,13 @@ async function enviarSegunEstado(impresora, trabajo) {
 
 /**
  * BUG-17 (QA ronda 3, 25-nov): si otra impresora tomó la IP vieja de esta, la comanda salía en la equivocada.
- * Null si en `host` está la esperada o no se puede saber (sin MAC conocida, o sin entrada en la tabla ARP:
- * otra red o AP isolation, igual que hoy). Si la tabla ve OTRA MAC, el motivo.
+ * La regla está en print-core/envio-con-estado.js (otraImpresoraEnIp); acá solo se lee la tabla ARP.
  */
 async function otraImpresoraEn(impresora, host) {
-  if (!impresora.mac) return null;
-  const mac = await discovery.macEn(host);
-  if (!mac || mac === impresora.mac) return null;
-  const otra = registro.lista().find((i) => i.mac === mac && i !== impresora);
-  const quien = otra ? `"${otra.nombre || otra.clave}"` : `otro equipo (${mac})`;
-  log(`BUG-17: en ${host} está ${quien}, no "${impresora.nombre || impresora.clave}" (${impresora.mac}); no se imprime ahí`);
-  return `En ${host} contesta ${quien}, no esta impresora: no se mandó nada`;
+  if (!(impresora.mac || impresora.macAnterior)) return null;
+  const motivo = otraImpresoraEnIp(impresora, await discovery.macEn(host), host, registro.lista());
+  if (motivo) log(`BUG-17: ${motivo}`);
+  return motivo;
 }
 
 /**

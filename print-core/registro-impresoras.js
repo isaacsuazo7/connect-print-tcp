@@ -61,6 +61,9 @@ class RegistroImpresoras {
       const lista = JSON.parse(fs.readFileSync(this.archivo, "utf8"));
       // OBS-04: las fantasmas que quedaron guardadas antes del arreglo (0.0.0.0) se olvidan al arrancar.
       for (const imp of Array.isArray(lista) ? lista : []) if (esIpDeImpresora(imp.ip)) this.impresoras.set(imp.clave, imp);
+      // BUG-25: los duplicados sin código que ya aprendieron la MAC de una impresora con código, también.
+      const macsConCodigo = new Set(this.lista().filter((i) => i.codImpresora && i.mac).map((i) => i.mac));
+      for (const imp of this.lista()) if (!imp.codImpresora && imp.mac && macsConCodigo.has(imp.mac)) this.impresoras.delete(imp.clave);
     } catch (error) {
       // Archivo roto (corte de luz a mitad de escritura): se empieza de cero y se reaprende.
       console.error(new Date().toISOString(), "Registro de impresoras ilegible, se empieza vacío", error.message);
@@ -177,6 +180,14 @@ class RegistroImpresoras {
   aprenderMac(imp, mac) {
     const normalizada = normalizarMac(mac);
     if (!normalizada || imp.mac === normalizada) return;
+    // BUG-25 (QA ronda 3): un registro sin código (creado por un pedido sin codImpresora) aprendió la MAC de
+    // "Test" y desde ahí cada cambio de Test salía dos veces. Si esa MAC ya es de una impresora con código,
+    // este es un duplicado: se olvida.
+    if (!imp.codImpresora && this.lista().some((i) => i !== imp && i.codImpresora && i.mac === normalizada)) {
+      this.impresoras.delete(imp.clave);
+      this.guardar();
+      return;
+    }
     imp.mac = normalizada;
     imp.macAnterior = null; // la IP nueva respondió: es esta impresora, la anterior ya no cuenta (OBS-05)
     this.guardar();

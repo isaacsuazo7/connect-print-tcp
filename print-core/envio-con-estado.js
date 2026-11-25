@@ -88,4 +88,26 @@ function estadoParaDecidir(consulta, conocido) {
   return conocido.estado;
 }
 
-module.exports = { enviarRevisandoEstado, esErrorFisico, ERROR_FISICO, ERROR_OTRA_IMPRESORA };
+/**
+ * BUG-17: ¿en esa IP contesta otra impresora? Null si es la esperada o no se puede saber; si no, el motivo.
+ * - Sin MAC esperada (ni propia ni anterior) o sin entrada en la tabla ARP (otra red, AP isolation): no se sabe.
+ * - Con MAC propia: cualquier otra MAC en la IP es otra impresora.
+ * - Solo con la MAC anterior (log de QA 25-nov 15:55: la nube tenía COCINA en la IP nueva, el POS mandó la vieja
+ *   y el agente lo tomó como reconfiguración, OBS-05): es otra solo si esa MAC es de otra impresora conocida.
+ *   Si es un equipo desconocido, la cambiaron por una nueva y se imprime como antes.
+ * @param {{ mac?: string|null, macAnterior?: string|null, nombre?: string|null, clave: string }} impresora
+ * @param {string | null} macEnIp lo que la tabla ARP ve en esa IP
+ * @param {string} host
+ * @param {object[]} conocidas todas las del registro
+ * @returns {string | null}
+ */
+function otraImpresoraEnIp(impresora, macEnIp, host, conocidas) {
+  const esperada = impresora.mac || impresora.macAnterior;
+  if (!esperada || !macEnIp || macEnIp === esperada) return null;
+  const otra = conocidas.find((i) => i !== impresora && i.mac === macEnIp);
+  if (!impresora.mac && !otra) return null;
+  const quien = otra ? `"${otra.nombre || otra.clave}"` : `otro equipo (${macEnIp})`;
+  return `En ${host} contesta ${quien}, no "${impresora.nombre || impresora.clave}": no se mandó nada`;
+}
+
+module.exports = { enviarRevisandoEstado, esErrorFisico, ERROR_FISICO, ERROR_OTRA_IMPRESORA, otraImpresoraEnIp };

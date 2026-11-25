@@ -148,3 +148,26 @@ test("OBS-04: 0.0.0.0 o vacía no es una impresora; las fantasmas guardadas se o
   const registro = new RegistroImpresoras(archivo);
   assert.deepEqual(registro.lista().map((i) => i.clave), ["cod:977"]);
 });
+
+// BUG-25 (QA ronda 3, 25-nov): registro "ip:192.168.10.201:9100" sin código con la MAC de Test.
+test("un registro sin código que aprende la MAC de una impresora con código se olvida (duplicado)", () => {
+  const r = new RegistroImpresoras(null);
+  r.resolverDestino({ ip: "192.168.10.241", puerto: 9100, codImpresora: 1414, mac: "00:61:8F:6A:3A:5F" });
+  const { impresora: fantasma } = r.resolverDestino({ ip: "192.168.10.201", puerto: 9100 });
+  assert.equal(r.lista().length, 2);
+
+  r.aprenderMac(fantasma, "00:61:8F:6A:3A:5F");
+
+  assert.equal(r.lista().length, 1, "quedó solo Test");
+  assert.equal(r.lista()[0].codImpresora, 1414);
+});
+
+test("al arrancar se olvidan los duplicados sin código con la MAC de una impresora con código", () => {
+  const archivo = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "reg-")), "impresoras.json");
+  fs.writeFileSync(archivo, JSON.stringify([
+    { clave: "cod:1414", codImpresora: 1414, nombre: "Test", mac: "00:61:8F:6A:3A:5F", ipConocida: "192.168.10.241", ip: "192.168.10.241", puerto: 9100 },
+    { clave: "ip:192.168.10.201:9100", codImpresora: null, nombre: null, mac: "00:61:8F:6A:3A:5F", ipConocida: "192.168.10.201", ip: "192.168.10.241", puerto: 9100 },
+  ]));
+  const r = new RegistroImpresoras(archivo);
+  assert.deepEqual(r.lista().map((i) => i.clave), ["cod:1414"]);
+});

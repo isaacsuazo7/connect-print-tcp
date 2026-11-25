@@ -2,7 +2,7 @@
 // BUG-10 del reporte de QA (19-nov-2026): sin papel / tapa abierta no se manda nada y el resultado es fallido.
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
-const { enviarRevisandoEstado, esErrorFisico, ERROR_FISICO, ERROR_OTRA_IMPRESORA } = require("../print-core/envio-con-estado");
+const { enviarRevisandoEstado, esErrorFisico, ERROR_FISICO, ERROR_OTRA_IMPRESORA, otraImpresoraEnIp } = require("../print-core/envio-con-estado");
 const { consultarEstado, ESTADO } = require("../print-core/estado-impresora");
 const { enviarTrabajo, RESULTADO, ERROR } = require("../print-core/envio");
 const { MonitorImpresoras } = require("../print-core/monitor-impresoras");
@@ -152,4 +152,24 @@ test("clon sin DLE EOT con otra impresora en la IP: tampoco manda", async () => 
   assert.equal(envio.error, ERROR_OTRA_IMPRESORA);
   assert.equal(imp.trabajos.length, 0);
   await imp.cerrar();
+});
+
+// BUG-17 con el log de QA (25-nov 15:55): COCINA quedó sin MAC propia (solo la anterior) tras tomar la IP
+// vieja del POS como reconfiguración, y en esa IP estaba Test.
+test("otraImpresoraEnIp: con MAC propia, cualquier otra MAC en la IP es otra impresora", () => {
+  const cocina = { clave: "cod:502", nombre: "COCINA", mac: "02:10:7B:1A:39:A0" };
+  assert.equal(otraImpresoraEnIp(cocina, "02:10:7B:1A:39:A0", "192.168.10.100", [cocina]), null);
+  assert.equal(otraImpresoraEnIp(cocina, null, "192.168.10.100", [cocina]), null, "sin entrada ARP no se sabe");
+  assert.match(otraImpresoraEnIp(cocina, "AA:AA:AA:AA:AA:AA", "192.168.10.100", [cocina]), /otro equipo/);
+});
+
+test("otraImpresoraEnIp: solo con la MAC anterior, bloquea si en la IP está otra impresora conocida", () => {
+  const cocina = { clave: "cod:502", nombre: "COCINA", mac: null, macAnterior: "02:10:7B:1A:39:A0" };
+  const test1 = { clave: "cod:1414", nombre: "Test", mac: "00:61:8F:6A:3A:5F" };
+  assert.match(otraImpresoraEnIp(cocina, "00:61:8F:6A:3A:5F", "192.168.10.100", [cocina, test1]), /"Test"/);
+});
+
+test("otraImpresoraEnIp: solo con la MAC anterior y un equipo desconocido, es una impresora nueva (OBS-05)", () => {
+  const cocina = { clave: "cod:502", nombre: "COCINA", mac: null, macAnterior: "02:10:7B:1A:39:A0" };
+  assert.equal(otraImpresoraEnIp(cocina, "BB:BB:BB:BB:BB:BB", "192.168.10.120", [cocina]), null);
 });
