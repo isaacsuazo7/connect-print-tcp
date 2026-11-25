@@ -3,8 +3,10 @@
 - Copiar el YaloPrinterService.exe compilado (npm run build && npm run packing -> dist) en la carpeta "resources".
 - Doble click en "install". Pide permisos de administrador.
 - Si habia una version anterior instalada, la reemplaza.
-- El servicio queda escuchando en el puerto 3000 de TODAS las redes de la PC y en 127.0.0.1.
-  El POS de esta PC lo encuentra solo: ya no hace falta copiar la IP en el POS ni en el flag de Chrome.
+- El servicio queda en el puerto 3000 y solo atiende a esta misma PC (otro equipo recibe "Solo se
+  permite desde esta PC"; las tablets usan la app).
+- El POS de esta PC lo encuentra solo: ya no hace falta copiar la IP en el POS ni en el flag de Chrome.
+  Abrir el POS en esta PC y tocar Reconectar impresoras: activa el servidor de impresoras de la caja.
 - Arranca solo al prender la PC (con retardo, para esperar la red) y se reinicia solo si se cae.
 - Queda en %ProgramFiles%\Yalo\PrintAgent. La carpeta del paquete se puede borrar despues de instalar.
 - Logs y datos (cola, impresoras): %ProgramData%\Yalo\PrintAgent (servicio.log)
@@ -21,7 +23,7 @@
 - Carpeta "extra" -> doble click en "restart".
 
 == VER LAS IP DE ESTA PC ==
-- Solo hace falta si una tablet imprime A TRAVES de esta PC desde el navegador.
+- Para soporte: si hay que configurar a mano el servidor de impresoras en el POS (casilla "IP de la PC").
 - Carpeta "extra" -> doble click en "showHostname".
 
 == ELIMINAR SERVICIO ==

@@ -17,6 +17,7 @@ const {
   ERROR,
   consultarEstado,
   enviarRevisandoEstado,
+  terminaAntesDe,
   esErrorFisico,
   SerializadorPorImpresora,
   RegistroImpresoras,
@@ -68,6 +69,13 @@ const INTERVALO_REVISION_RED_MS = 10000;
 const INTERVALO_DISCOVERY_MS = 60000;
 /** Tras un fallo de conexión se barre la red ya, pero no más de una vez cada 30 s (impresora apagada). */
 const ESPERA_ENTRE_RESCATES_MS = 30000;
+/**
+ * BUG-12 (QA ronda 2): /print contesta antes de esto aunque la búsqueda de la impresora no termine. El POS
+ * espera 10 s en la venta (TIMEOUT_AGENTE_YALO_MS) y más en segundo plano.
+ */
+const PRESUPUESTO_ENVIO_MS = 8000;
+/** Lo que necesita el reenvío a la IP encontrada: consulta de estado (2,5 s) + conexión (2 s). */
+const RESERVA_REENVIO_MS = 4500;
 /**
  * Auto-actualización (brief §6.2.1): solo cuando lo lanza el supervisor (servicio/supervisor.js), que es
  * quien cambia de versión y hace rollback. En desarrollo (node index.js) o sin supervisor, apagada.
@@ -328,23 +336,34 @@ async function enviarSegunEstado(impresora, trabajo) {
   return envio;
 }
 
-const imprimirAhora = (impresora, datos) =>
-  serializador.ejecutar(impresora.clave, async () => {
+/** OBS-05: primero la MAC anterior en la tabla ARP (rápido, sin freno); si no alcanza, la búsqueda completa. */
+async function buscarDondeEsta(impresora, ipAntes) {
+  await discovery.recuperarConMacAnterior(impresora);
+  if (impresora.ip === ipAntes) await rescatar();
+}
+
+const imprimirAhora = (impresora, datos) => {
+  // BUG-12 (QA ronda 2): el envío tiene que contestar antes de que el POS se canse de esperar (10 s); si no,
+  // el POS lo da por "incierto" y cierra la comanda como impresa aunque no salió.
+  const limite = Date.now() + PRESUPUESTO_ENVIO_MS;
+  return serializador.ejecutar(impresora.clave, async () => {
     marcarImpresion();
     let envio = await enviarSegunEstado(impresora, { host: impresora.ip, puerto: impresora.puerto, datos });
     // Solo si no conectó: con papel o tapa la impresora está ahí, buscarla por MAC no cambia nada.
     if (envio.resultado === RESULTADO.FALLIDO && envio.error === ERROR.SIN_CONEXION && (impresora.mac || impresora.macAnterior)) {
       const ipAntes = impresora.ip;
-      // OBS-05: primero la MAC anterior en la tabla ARP (rápido, sin freno); si no alcanza, la búsqueda completa.
-      await discovery.recuperarConMacAnterior(impresora);
-      if (impresora.ip === ipAntes) await rescatar();
-      if (impresora.ip !== ipAntes) envio = await enviarSegunEstado(impresora, { host: impresora.ip, puerto: impresora.puerto, datos });
+      // La búsqueda tiene hasta dejar tiempo para reenviar. Si no termina, se contesta "sin conexión" (el POS la
+      // deja pendiente) y la búsqueda sigue: si la encuentra, el próximo reintento ya va a la IP nueva.
+      const encontrada = await terminaAntesDe(buscarDondeEsta(impresora, ipAntes), limite - RESERVA_REENVIO_MS);
+      if (!encontrada) log(`${impresora.nombre || impresora.clave}: la búsqueda en la red no terminó a tiempo; queda pendiente en el POS`);
+      if (encontrada && impresora.ip !== ipAntes) envio = await enviarSegunEstado(impresora, { host: impresora.ip, puerto: impresora.puerto, datos });
     }
     monitor.registrarEnvio(impresora, envio.resultado, envio.error);
     const capturarMac = !impresora.mac && impresora.discovery !== DISCOVERY.DEGRADADO;
     if (envio.resultado === RESULTADO.IMPRESO && capturarMac) discovery.ubicar(); // en segundo plano
     return envio;
   });
+};
 
 // ---------------------------------------------------------------------------------------------------
 // SERVIDOR

@@ -82,7 +82,7 @@ netsh advfirewall firewall add rule name="%SERVICE_NAME% (programa)" dir=in acti
 NET START %SERVICE_NAME%
 
 echo.
-echo YaloPrinterService quedo instalado en "%INSTALL_DIR%" y escuchando en el puerto %LOCAL_PORT% de todas las redes de esta PC.
+echo YaloPrinterService quedo instalado en "%INSTALL_DIR%" (puerto %LOCAL_PORT%). Solo atiende a esta PC.
 echo Se actualiza solo cuando Yalo publica una version nueva.
 echo El POS de esta PC lo encuentra solo: no hace falta copiar ninguna IP.
-echo Solo si una tablet imprime a traves de esta PC desde el navegador, ver la IP con extra\showHostname.bat
+echo Abre el POS en esta PC y toca Reconectar impresoras en Configuracion - Dispositivos.

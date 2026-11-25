@@ -5,6 +5,7 @@
 module.exports = {
   ...require("./envio"),
   ...require("./envio-con-estado"),
+  ...require("./plazo"),
   ...require("./serializador"),
   ...require("./estado-impresora"),
   ...require("./mac"),

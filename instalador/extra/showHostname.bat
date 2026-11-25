@@ -1,6 +1,6 @@
 @echo off
-REM Muestra las IP de esta PC. Solo hace falta para una tablet que imprime A TRAVES de esta PC desde el
-REM navegador: la PC de caja se encuentra sola por 127.0.0.1 (el servicio escucha en todas sus redes).
+REM Muestra las IP de esta PC. Para soporte: configurar a mano el servidor de impresoras en el POS. La PC
+REM de caja se encuentra sola por 127.0.0.1 y el servicio solo atiende a esta PC (OBS-14).
 setlocal
 
 set SERVICE_NAME=YaloPrinterService
@@ -13,7 +13,7 @@ if %errorlevel% equ 1060 (
 	exit /b
 )
 
-echo YaloPrinterService escucha en el puerto %LOCAL_PORT% de todas las redes de esta PC:
+echo IP de esta PC (YaloPrinterService, puerto %LOCAL_PORT%, solo atiende a esta PC):
 echo   http://127.0.0.1:%LOCAL_PORT%  (esta misma PC)
 for /f "tokens=2 delims=:" %%a in ('ipconfig ^| findstr /r /c:"IPv4"') do echo   http:%%a:%LOCAL_PORT%
 echo.
