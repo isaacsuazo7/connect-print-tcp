@@ -171,3 +171,24 @@ test("al arrancar se olvidan los duplicados sin código con la MAC de una impres
   const r = new RegistroImpresoras(archivo);
   assert.deepEqual(r.lista().map((i) => i.clave), ["cod:1414"]);
 });
+
+// BUG-25 (QA ronda 3): el origen del duplicado, un pedido sin código a una IP donde ya hay una con código.
+test("pedido sin código a la IP donde hoy está una impresora con código: usa esa, sin crear duplicado", () => {
+  const r = new RegistroImpresoras(null);
+  const { impresora: test1 } = r.resolverDestino({ ip: "192.168.10.201", puerto: 9100, codImpresora: 1414, mac: "00:61:8F:6A:3A:5F" });
+  r.moverA(test1, "192.168.10.205"); // el discovery la encontró en otra IP; el POS (con código) sigue en la .201
+
+  const d = r.resolverDestino({ ip: "192.168.10.205", puerto: 9100 });
+
+  assert.equal(d.impresora, test1);
+  assert.equal(r.lista().length, 1, "no se creó un registro ip:…");
+  assert.equal(test1.ipConocida, "192.168.10.201", "no se reconfiguró por un pedido sin código");
+});
+
+test("pedido sin código a una IP desconocida: se registra como siempre (POS de producción)", () => {
+  const r = new RegistroImpresoras(null);
+  r.resolverDestino({ ip: "192.168.10.201", puerto: 9100, codImpresora: 1414 });
+  const d = r.resolverDestino({ ip: "192.168.10.50", puerto: 9100 });
+  assert.equal(r.lista().length, 2);
+  assert.equal(d.ip, "192.168.10.50");
+});

@@ -95,6 +95,11 @@ class RegistroImpresoras {
     return this.lista().find((i) => i.ipConocida === ip && i.puerto === puerto) ?? null;
   }
 
+  /** Impresora con código que hoy está en esa IP (puede no ser la que el POS tiene configurada). */
+  buscarConCodigoPorIpActual(ip, puerto) {
+    return this.lista().find((i) => i.codImpresora && i.ip === ip && i.puerto === puerto) ?? null;
+  }
+
   /**
    * A dónde imprimir lo que el POS mandó a ip:puerto. Registra la impresora si es nueva.
    * @param {{ ip: string, puerto: number, codImpresora?: number|null, mac?: string|null }} pedido
@@ -104,6 +109,14 @@ class RegistroImpresoras {
     const cod = Number.isInteger(pedido.codImpresora) && pedido.codImpresora > 0 ? pedido.codImpresora : null;
     let imp = (cod && this.buscarPorCodigo(cod)) || this.buscarPorIpConocida(pedido.ip, pedido.puerto);
     const esOtraImpresora = imp && cod && imp.codImpresora && imp.codImpresora !== cod;
+
+    // BUG-25 (QA ronda 3): un pedido sin código a la IP donde HOY está una impresora con código es para esa
+    // impresora; antes se creaba un registro "ip:…" que después aprendía su MAC (duplicado). No se reconfigura:
+    // sin código no hay nada que diga que su IP cambió.
+    const conCodigoEnEsaIp = !cod && !imp ? this.buscarConCodigoPorIpActual(pedido.ip, pedido.puerto) : null;
+    if (conCodigoEnEsaIp) {
+      return { impresora: conCodigoEnEsaIp, ip: conCodigoEnEsaIp.ip, redirigida: false };
+    }
 
     if (!imp || esOtraImpresora) {
       imp = this.nueva({ codImpresora: cod, ip: pedido.ip, puerto: pedido.puerto, mac: pedido.mac, origen: ORIGEN.POS });
